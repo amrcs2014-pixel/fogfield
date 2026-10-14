@@ -1,0 +1,25 @@
+\begin{table}
+\caption{Measured gossip overhead (application-layer payload only; no MAC/PHY).}
+\label{tab:table6_overhead}
+\begin{tabular}{llrrrr}
+\toprule
+ &  & gossip\_msgs\_per\_round & gossip\_bytes\_per\_round & gossip\_bytes\_per\_node\_round & gossip\_rounds \\
+testbed & algo &  &  &  &  \\
+\midrule
+\multirow[t]{6}{*}{BEJ} & Consensus-ADMM & 148.120 & 5286.190 & 132.420 & 150.000 \\
+ & FogField-BR & 122.910 & 3259.630 & 83.690 & 150.000 \\
+ & FogField-LLL & 126.090 & 3454.710 & 88.520 & 150.000 \\
+ & GossipGreedy & 93.900 & 2495.610 & 60.080 & 150.000 \\
+ & Guerrero-style & 132.560 & 3829.230 & 95.170 & 150.000 \\
+ & MARL-IQL & 119.770 & 3540.110 & 90.390 & 150.000 \\
+\cline{1-6}
+\multirow[t]{6}{*}{MEL} & Consensus-ADMM & 187.840 & 8216.090 & 236.460 & 150.000 \\
+ & FogField-BR & 188.060 & 7982.860 & 221.850 & 150.000 \\
+ & FogField-LLL & 188.550 & 7861.830 & 214.500 & 150.000 \\
+ & GossipGreedy & 189.130 & 8343.850 & 235.140 & 150.000 \\
+ & Guerrero-style & 188.310 & 8241.580 & 231.230 & 150.000 \\
+ & MARL-IQL & 184.450 & 7693.240 & 210.440 & 150.000 \\
+\cline{1-6}
+\bottomrule
+\end{tabular}
+\end{table}

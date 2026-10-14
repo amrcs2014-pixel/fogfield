@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the paper (citation details will be added on publication)."
+title: "FogField: Fully Decentralized Repositioning of UAV-Mounted Fog Nodes via Potential Games and Gossip"
+authors:
+  - family-names: Abdelhaliem
+    given-names: Amr H.
+    affiliation: "Department of Cyber Security, Irbid National University, Irbid, Jordan"
+version: "v1.0"
+date-released: "2026-10-14"
+license: MIT

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+code/fogfield_out_full/
+code/fogfield_out/
+code/paper_figs/
+code/docx_build/
+*.tmp*
+code/*.log

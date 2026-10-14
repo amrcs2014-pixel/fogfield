@@ -1,0 +1,5 @@
+algo,nash_epsilon,nash_epsilon_rel,nash_mean_improvement,nash_is_eps_nash_1pct,loc_rank_agreement,loc_info_fraction,loc_regret_mean,loc_regret_max
+Consensus-ADMM,0.09128,0.12495,0.06923,0.33333,0.13889,0.54202,0.02567,0.11071
+FogField-BR,0.01226,0.01044,0.00289,0.66667,0.55556,0.41595,0.00131,0.02737
+FogField-LLL,0.00407,0.00342,0.00143,1.0,0.22222,0.28846,0.00082,0.00874
+GossipGreedy,0.00923,0.00779,0.00303,0.66667,0.22222,0.80769,0.00131,0.01223

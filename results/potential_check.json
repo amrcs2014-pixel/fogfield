@@ -1,0 +1,14 @@
+{
+ "uncapacitated": {
+  "n_trials": 40,
+  "max_violation": 0.0,
+  "mean_violation": 0.0,
+  "exact": true
+ },
+ "capacitated": {
+  "n_trials": 25,
+  "max_violation": 0.0,
+  "mean_violation": 0.0,
+  "exact": true
+ }
+}

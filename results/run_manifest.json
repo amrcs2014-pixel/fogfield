@@ -1,0 +1,163 @@
+{
+ "generated_utc": "2026-09-23T07:42:40Z",
+ "quick_mode": false,
+ "datasets": {
+  "MEL": {
+   "source": "EUA dataset (swinedge/eua-dataset), Melbourne CBD",
+   "urls": [
+    "https://raw.githubusercontent.com/swinedge/eua-dataset/master/edge-servers/site-optus-melbCBD.csv",
+    "https://raw.githubusercontent.com/swinedge/eua-dataset/master/users/users-melbcbd-generated.csv"
+   ],
+   "n_sites_raw": 125,
+   "n_users_raw": 816,
+   "origin_latlon": [
+    -37.814137469827784,
+    144.963326447521
+   ],
+   "temporal": "static (single demand slot); dynamics come from the scenario engine"
+  },
+  "BEJ": {
+   "source": "GeoLife GPS Trajectories v1.3 (Microsoft Research Asia)",
+   "url": "https://download.microsoft.com/download/F/4/8/F4894AA5-FDBC-481E-9285-D5F8C4C4F039/Geolife%20Trajectories%201.3.zip",
+   "n_users_used": 1,
+   "n_points_in_roi": 2899872,
+   "grid_m": 400.0,
+   "slot_min": 30,
+   "n_slots": 48,
+   "roi_km": 12.0,
+   "roi_centre_latlon": [
+    39.9042,
+    116.4074
+   ],
+   "pooling": "trajectories pooled across days onto a common time-of-day clock; this is a diurnal demand surface, not one day's simultaneous population"
+  }
+ },
+ "testbed_summary": {
+  "MEL": "MEL: 816 devices, 125 sites, 1 demand slot(s), area 2.00 x 1.44 km",
+  "BEJ": "BEJ: 500 devices, 62 sites, 48 demand slot(s), area 11.60 x 11.60 km"
+ },
+ "uav_model": {
+  "reference": "Zeng, Xu & Zhang, IEEE TWC 18(4):2329-2345, 2019, DOI 10.1109/TWC.2019.2902559",
+  "P0_W": 79.86,
+  "Pi_W": 88.63,
+  "U_tip_mps": 120.0,
+  "v0_mps": 4.03,
+  "d0": 0.6,
+  "rho": 1.225,
+  "s": 0.05,
+  "A_m2": 0.503,
+  "V_max_mps": 20.0,
+  "battery_Wh": 275.0,
+  "P_hover_W": 168.49
+ },
+ "weights": {
+  "coverage": 1.0,
+  "connectivity": 0.35,
+  "energy": 0.15,
+  "note": "weighted scalarisation; one point on the trade-off surface, not a Pareto front"
+ },
+ "grid": {
+  "nodes": [
+   20,
+   50
+  ],
+  "seeds": [
+   0,
+   1,
+   2,
+   3,
+   4
+  ],
+  "rounds": 150,
+  "scale_nodes": [
+   50,
+   100,
+   200,
+   400,
+   800
+  ],
+  "milp_nodes": [
+   4,
+   5,
+   6,
+   7,
+   8
+  ]
+ },
+ "verification": {
+  "exact_potential_uncapacitated": {
+   "n_trials": 40,
+   "max_violation": 0.0,
+   "mean_violation": 0.0,
+   "exact": true
+  },
+  "exact_potential_capacitated": {
+   "n_trials": 25,
+   "max_violation": 0.0,
+   "mean_violation": 0.0,
+   "exact": true
+  },
+  "checkpoint_resume_selftest": {
+   "identical": true,
+   "max_deviation": 0.0,
+   "ref_rounds": 24,
+   "resumed_rounds": 24,
+   "killed_at_round": 9
+  }
+ },
+ "counts": {
+  "main": 1620,
+  "scalability": 81,
+  "milp": 25,
+  "equilibrium": 12
+ },
+ "scenarios": {
+  "static": "no exogenous change",
+  "mobility": "demand advances through real time-of-day slots",
+  "random_failures": "independent per-round node failures",
+  "traffic_shift": "abrupt jumps in the demand field",
+  "expansion": "new nodes join twice",
+  "catastrophic": "50% simultaneous node loss at the midpoint",
+  "flash_crowd": "localised demand surge for a window",
+  "seed_loss": "bootstrap/seed node removed at the midpoint",
+  "byzantine": "a fraction of nodes gossip falsified state"
+ },
+ "algorithms": {
+  "FogField-BR": {
+   "decentralized": true,
+   "uses_gossip": true
+  },
+  "FogField-LLL": {
+   "decentralized": true,
+   "uses_gossip": true
+  },
+  "GossipGreedy": {
+   "decentralized": true,
+   "uses_gossip": true
+  },
+  "Guerrero-style": {
+   "decentralized": true,
+   "uses_gossip": true
+  },
+  "Consensus-ADMM": {
+   "decentralized": true,
+   "uses_gossip": true
+  },
+  "MARL-IQL": {
+   "decentralized": true,
+   "uses_gossip": true
+  },
+  "D-POA-style": {
+   "decentralized": false,
+   "uses_gossip": false
+  },
+  "Static": {
+   "decentralized": true,
+   "uses_gossip": false
+  },
+  "RandomWalk": {
+   "decentralized": true,
+   "uses_gossip": false
+  }
+ }
+}
