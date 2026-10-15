@@ -6,3 +6,8 @@ code/paper_figs/
 code/docx_build/
 *.tmp*
 code/*.log
+code/fogfield_out_v2/
+code/paper_figs_v2/
+code/paper_tables/
+code/logs_v2/
+code/paper_numbers.json

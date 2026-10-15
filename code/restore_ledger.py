@@ -1,4 +1,4 @@
-"""Unpack the released experiment ledger and derived dataset caches into code/fogfield_out_full/,
+"""Unpack the released experiment ledger and derived dataset caches into code/fogfield_out_v2/,
 which is where fogfield_src_fullrun.py (and driver.py) look for them.
 
     cd code
@@ -9,7 +9,7 @@ import os, shutil, zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, '..'))
-OUT = os.path.join(HERE, 'fogfield_out_full')
+OUT = os.path.join(HERE, 'fogfield_out_v2')
 
 for d in ['cache', 'ckpt', 'results', 'figs', 'tables', 'logs']:
     os.makedirs(os.path.join(OUT, d), exist_ok=True)

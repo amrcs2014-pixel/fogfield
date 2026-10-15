@@ -1,5 +1,5 @@
 {
- "generated_utc": "2026-09-23T07:42:40Z",
+ "generated_utc": "2026-10-15T00:27:55Z",
  "quick_mode": false,
  "datasets": {
   "MEL": {
@@ -19,7 +19,7 @@
   "BEJ": {
    "source": "GeoLife GPS Trajectories v1.3 (Microsoft Research Asia)",
    "url": "https://download.microsoft.com/download/F/4/8/F4894AA5-FDBC-481E-9285-D5F8C4C4F039/Geolife%20Trajectories%201.3.zip",
-   "n_users_used": 1,
+   "n_users_used": 182,
    "n_points_in_roi": 2899872,
    "grid_m": 400.0,
    "slot_min": 30,
@@ -106,10 +106,40 @@
   }
  },
  "counts": {
-  "main": 1620,
-  "scalability": 81,
+  "main": 1980,
+  "scalability": 90,
   "milp": 25,
-  "equilibrium": 12
+  "equilibrium": 40,
+  "lll_schedule": 100,
+  "viewbound": 4
+ },
+ "seeding": "v2: common random numbers; deployment/scenario/adversary streams seeded by (testbed, n, seed), algorithm stream by (testbed, n, seed, algorithm); SHA-256-derived seeds, independent of PYTHONHASHSEED",
+ "lll_schedules": {
+  "base": {
+   "beta0": 8.0,
+   "beta_growth": 0.45,
+   "beta_max": 400.0
+  },
+  "fast": {
+   "beta0": 8.0,
+   "beta_growth": 4.0,
+   "beta_max": 400.0
+  },
+  "cap4000": {
+   "beta0": 8.0,
+   "beta_growth": 4.0,
+   "beta_max": 4000.0
+  },
+  "fixed400": {
+   "beta0": 400.0,
+   "beta_growth": 0.0,
+   "beta_max": 400.0
+  },
+  "fixed50": {
+   "beta0": 50.0,
+   "beta_growth": 0.0,
+   "beta_max": 50.0
+  }
  },
  "scenarios": {
   "static": "no exogenous change",
@@ -119,8 +149,10 @@
   "expansion": "new nodes join twice",
   "catastrophic": "50% simultaneous node loss at the midpoint",
   "flash_crowd": "localised demand surge for a window",
-  "seed_loss": "bootstrap/seed node removed at the midpoint",
-  "byzantine": "a fraction of nodes gossip falsified state"
+  "seed_loss": "one node (the bootstrap/seed node) removed at the midpoint",
+  "byzantine": "a fraction of nodes gossip falsified state",
+  "controller_loss": "centralised controller dies at the midpoint; demand surge follows",
+  "late_surge": "demand surge ten rounds after the midpoint (control twin of controller_loss)"
  },
  "algorithms": {
   "FogField-BR": {

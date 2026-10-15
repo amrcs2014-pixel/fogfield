@@ -54,12 +54,13 @@ class GossipLayer:
     """Push-pull gossip for neighbour discovery and demand hints, with real byte accounting."""
 
     def __init__(self, n_nodes: int, R_comm: float, fanout: int = 3, ttl: int = 4,
-                 max_nbr_ids: int = 12):
+                 max_nbr_ids: int = 12, max_view: Optional[int] = 12):
         self.n = n_nodes
         self.R_comm = R_comm
         self.fanout = fanout
         self.ttl = ttl
-        self.max_nbr_ids = max_nbr_ids
+        self.max_nbr_ids = max_nbr_ids      # neighbour ids carried on the wire (uint8 count)
+        self.max_view = max_view            # beacon-side bound on the local view; None = unbounded
         self.views = [LocalView() for _ in range(n_nodes)]
         self.seq = np.zeros(n_nodes, dtype=np.int64)
         self.bytes_total = 0
@@ -148,9 +149,9 @@ class GossipLayer:
         # is a realism fix as much as a performance one.
         for i in np.flatnonzero(alive):
             cand = nbrs[i]
-            if cand.size > self.max_nbr_ids:
+            if self.max_view is not None and cand.size > self.max_view:
                 d2 = ((pos[cand] - pos[i][None, :]) ** 2).sum(1)
-                cand = cand[np.argsort(d2)[: self.max_nbr_ids]]
+                cand = cand[np.argsort(d2)[: self.max_view]]
             v = self.views[i]
             for j in cand:
                 j = int(j)
@@ -175,6 +176,10 @@ class GossipLayer:
         v.demand_hint[sid] = hint
         v.nbrs_of[sid] = ids
         v.last_seen[sid] = rnd
+
+    def view_sizes(self) -> np.ndarray:
+        """Number of other nodes each node currently knows about (its local view)."""
+        return np.array([len(v.pos) for v in self.views], dtype=np.int64)
 
     def stats(self) -> dict:
         rounds = max(len(self.per_round), 1)
@@ -285,7 +290,9 @@ def local_utility(env: Environment, i: int, cands: np.ndarray, pos: np.ndarray,
             conn_gain[c] = _largest_component_size(adj, nbr_ids + [i]) - without_i
 
     # --- own energy --------------------------------------------------------
-    dist = np.linalg.norm(cands - prev[i][None, :], axis=1)
+    # flight energy of the move this node is deciding now: from its CURRENT position
+    # (v1.0 used prev[i], the position one slot earlier)
+    dist = np.linalg.norm(cands - pos[i][None, :], axis=1)
     e_fly = env.uav.flight_energy(dist, env.dt_s)
     e_cpu = env.uav.compute_energy(
         np.clip(cov_gain / max(env.W_total / max(env.n_nodes, 1), 1e-9), 0, 1), env.dt_s)

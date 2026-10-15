@@ -95,6 +95,8 @@ class FogFieldBR(Controller):
         self.p_activate = p_activate
         self.inertia = inertia
         self.max_actions = max_actions
+        self.t_decide = 0.0          # seconds spent evaluating local utilities
+        self.n_decide = 0            # node-decisions made (for the view-bound measurement)
 
     def step(self, env, ctx):
         target = ctx.pos.copy()
@@ -104,10 +106,17 @@ class FogFieldBR(Controller):
             if ctx.rng.random() < self.inertia:
                 continue
             cands = env.action_set(ctx.pos[i], self.max_actions)
+            t0 = time.perf_counter()
             u = local_utility(env, i, cands, ctx.pos, ctx.prev,
                               ctx.gossip.views[i], ctx.w,
                               _sensed_devices(env, ctx.pos[i]))
-            target[i] = cands[int(np.argmax(u))]
+            self.t_decide += time.perf_counter() - t0
+            self.n_decide += 1
+            best = int(np.argmax(u))
+            here = np.flatnonzero(np.all(np.abs(cands - ctx.pos[i][None, :]) < 1e-6, axis=1))
+            if here.size and u[here[0]] >= u[best] - 1e-12:
+                best = int(here[0])          # ties go to staying, so rest points are absorbing
+            target[i] = cands[best]
         return _apply_move(env, ctx.pos, target, ctx.alive)
 
 
@@ -263,7 +272,7 @@ class ConsensusADMM(Controller):
             g = (coef[:, None] * (d / r[:, None])).sum(axis=0)
         # movement penalty pulls back toward where the node already is
         g -= (env.weights.energy / max(env.weights.coverage, 1e-9)) * \
-            (x - ctx.prev[i]) / max(env.max_step, 1e-9)
+            (x - ctx.pos[i]) / max(env.max_step, 1e-9)
         n = float(np.linalg.norm(g))
         return g / n if n > 1e-12 else np.zeros(2)
 
@@ -440,14 +449,26 @@ class DPOAStyleSwarm(Controller):
         self.pbest_f = np.full(P, -np.inf)
 
     def step(self, env, ctx):
+        # environmental change (v2): a new demand field re-initialises the swarm around the
+        # current configuration, as D-POA does on detected change
+        w_last = getattr(self, "_w_last", None)
+        if w_last is not None and (w_last.shape != ctx.w.shape or not np.array_equal(w_last, ctx.w)):
+            self.swarm = None
+        self._w_last = np.array(ctx.w, copy=True)
         if self.swarm is None or self.swarm.shape[1] != ctx.pos.shape[0]:
             self._init_swarm(env, ctx.pos, ctx.rng)
+        elif self.pbest_f is not None and np.isfinite(self.pbest_f).any():
+            # re-evaluate the memory under this slot's demand and origin (v2): without it the
+            # swarm chases optima remembered from earlier demand slots
+            for p in range(self.n_particles):
+                cand = _apply_move(env, ctx.pos, self.pbest[p], ctx.alive)
+                self.pbest_f[p] = env.phi(cand, ctx.pos, ctx.alive, ctx.w)
         rng = ctx.rng
         for _ in range(self.inner):
             fits = np.empty(self.n_particles)
             for p in range(self.n_particles):
                 cand = _apply_move(env, ctx.pos, self.swarm[p], ctx.alive)
-                fits[p] = env.phi(cand, ctx.prev, ctx.alive, ctx.w)
+                fits[p] = env.phi(cand, ctx.pos, ctx.alive, ctx.w)
             better = fits > self.pbest_f
             self.pbest[better] = self.swarm[better]
             self.pbest_f[better] = fits[better]
@@ -463,7 +484,8 @@ class DPOAStyleSwarm(Controller):
         return _apply_move(env, ctx.pos, gbest, ctx.alive)
 
     def on_event(self):
-        """Dynamic re-initialisation, as D-POA does on topology change."""
+        """Dynamic re-initialisation, as D-POA does on topology change (and, in v2, on a
+        change of the demand field, see step)."""
         self.swarm = None
         self.pbest_f = None
 
