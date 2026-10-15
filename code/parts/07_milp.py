@@ -14,15 +14,23 @@ def selftest_resume(verbose: bool = True) -> dict:
     env = Environment(TESTBEDS["MEL"], n_nodes=8, lattice_m=150.0)
     common = dict(env=env, algo="FogField-LLL", scenario="static", rounds=24, ckpt_every=4)
 
-    # (1) clean, uninterrupted reference run
-    ref = simulate(seed=901, resume=False, **common)
+    # A private checkpoint folder: parallel grid workers each run this self-test at start-up,
+    # and must neither race on the same checkpoint file nor delete each other's checkpoints.
+    import shutil
+    shared_ckpt = DIRS["ckpt"]
+    DIRS["ckpt"] = shared_ckpt / "selftest_{}".format(os.getpid())
+    DIRS["ckpt"].mkdir(parents=True, exist_ok=True)
+    try:
+        # (1) clean, uninterrupted reference run
+        ref = simulate(seed=901, resume=False, **common)
 
-    # (2) same unit, killed after 9 rounds, then resumed
-    for f in DIRS["ckpt"].glob("*.pkl"):
-        f.unlink()
-    part = simulate(seed=901, resume=True, stop_after=9, **common)
-    assert part.get("_partial"), "stop_after should have produced a partial result"
-    resumed = simulate(seed=901, resume=True, **common)
+        # (2) same unit, killed after 9 rounds, then resumed
+        part = simulate(seed=901, resume=True, stop_after=9, **common)
+        assert part.get("_partial"), "stop_after should have produced a partial result"
+        resumed = simulate(seed=901, resume=True, **common)
+    finally:
+        shutil.rmtree(DIRS["ckpt"], ignore_errors=True)
+        DIRS["ckpt"] = shared_ckpt
 
     a = np.asarray(ref["trace_phi"])
     b = np.asarray(resumed["trace_phi"])
@@ -70,12 +78,25 @@ import pulp
 
 
 def phi_reduced(env: Environment, pos, prev, active, w) -> float:
-    """Coverage minus energy only - the objective the MILP bounds."""
+    """Coverage minus energy (flight plus load-dependent compute), no connectivity."""
     cov = env.coverage(pos, active, w)
     ene = env.energy(pos, prev, active, w)
     N = float(env.n_nodes)
     return float(env.weights.coverage * cov / max(env.W_total, 1e-9)
                  - env.weights.energy * ene / (N * env.E_ref))
+
+
+def phi_subgame(env: Environment, pos, origin, active, w) -> float:
+    """The objective of the coverage-energy sub-game (Theorem T3) and of the MILP (v2):
+    coverage minus flight energy from `origin`, with compute energy held at its idle level."""
+    cov = env.coverage(pos, active, w)
+    idx = np.flatnonzero(active)
+    e_fly = float(np.sum(env.uav.flight_energy(np.linalg.norm(pos[idx] - origin[idx], axis=1),
+                                               env.dt_s)))
+    e_idle = float(idx.size * env.uav.P_cpu_idle * env.dt_s)
+    N = float(env.n_nodes)
+    return float(env.weights.coverage * cov / max(env.W_total, 1e-9)
+                 - env.weights.energy * (e_fly + e_idle) / (N * env.E_ref))
 
 
 def solve_milp(env: Environment, prev: np.ndarray, w: np.ndarray,
@@ -84,19 +105,16 @@ def solve_milp(env: Environment, prev: np.ndarray, w: np.ndarray,
     tb = env.testbed
     N = env.n_nodes
 
-    # candidate cells: the union of the nodes' reachable sets, capped for tractability
-    cells = np.unique(np.vstack([env.action_set(prev[i], max_actions=40)
-                                 for i in range(N)]), axis=0)
-    if len(cells) > lattice_cap:
-        sel = np.linspace(0, len(cells) - 1, lattice_cap).astype(int)
-        cells = cells[sel]
+    # candidate cells (v2): EVERY lattice cell, for every node. Heuristic configurations live
+    # on the same lattice, so each of them is MILP-feasible and the optimum is an exact upper
+    # bound on the sub-game objective. v1.0 subsampled at most `lattice_cap` cells from the
+    # nodes' nearest reachable sets, and heuristics occasionally beat that restricted optimum.
+    gx, gy = np.meshgrid(env.lat_x, env.lat_y, indexing="ij")
+    cells = np.stack([gx.ravel(), gy.ravel()], axis=1)
     C = len(cells)
-
-    reach = np.zeros((N, C), dtype=bool)
-    for i in range(N):
-        reach[i] = np.linalg.norm(cells - prev[i][None, :], axis=1) <= env.max_step + 1e-6
-        if not reach[i].any():
-            reach[i, int(np.argmin(np.linalg.norm(cells - prev[i][None, :], axis=1)))] = True
+    # flight energy is charged with the same capped function the scoring uses, so cells
+    # beyond one slot's reach are allowed at the capped price, exactly as in phi_subgame
+    reach = np.ones((N, C), dtype=bool)
 
     covers = ((cells[:, None, :] - tb.device_xy[None, :, :]) ** 2).sum(-1) <= env.R_cov ** 2
     e_cost = np.stack([env.uav.flight_energy(
@@ -122,7 +140,7 @@ def solve_milp(env: Environment, prev: np.ndarray, w: np.ndarray,
     Wt = max(env.W_total, 1e-9)
     denom = float(N) * env.E_ref
     cover_term = pulp.lpSum(env.weights.coverage * float(w[m]) / Wt * z[m] for m in z)
-    # compute energy is a constant offset here (every node is active), so only flight matters
+    # sub-game objective: compute energy at its idle level is a constant (every node active)
     energy_term = pulp.lpSum(env.weights.energy * float(e_cost[i, c]) / denom * y[(i, c)]
                              for (i, c) in y)
     prob += cover_term - energy_term
@@ -140,16 +158,16 @@ def solve_milp(env: Environment, prev: np.ndarray, w: np.ndarray,
 
     active = np.ones(N, dtype=bool)
     obj = pulp.value(prob.objective)
-    # add back the constant compute-energy offset so it is comparable to phi_reduced
-    e_cpu_const = float(np.sum(env.uav.compute_energy(
-        env.load_fraction(pos, active, w), env.dt_s)))
+    # subtract the constant idle compute energy so it is on the scale of phi_subgame
+    e_idle = float(N * env.uav.P_cpu_idle * env.dt_s)
     obj_comparable = (float(obj) if obj is not None else float("nan")) \
-        - env.weights.energy * e_cpu_const / denom
+        - env.weights.energy * e_idle / denom
 
     return {
         "status": status_name,
         "objective_bound": obj_comparable,
-        "objective_achieved": phi_reduced(env, pos, prev, active, w),
+        "objective_achieved": phi_subgame(env, pos, prev, active, w),
+        "objective_achieved_reduced": phi_reduced(env, pos, prev, active, w),
         "positions": pos,
         "n_cells": C,
         "n_binaries": len(y),
@@ -218,7 +236,7 @@ def locality_gap(env: Environment, pos, prev, active, w, gossip: GossipLayer,
     if live.size == 0:
         return {"rank_agreement": float("nan"), "regret_mean": float("nan")}
     sample = rng.choice(live, size=min(n_sample, live.size), replace=False)
-    agree, regret, info_frac = [], [], []
+    agree, regret, info_frac, top3 = [], [], [], []
     n_others = max(len(live) - 1, 1)
     for i in sample:
         i = int(i)
@@ -235,10 +253,12 @@ def locality_gap(env: Environment, pos, prev, active, w, gossip: GossipLayer,
         pick_loc = int(np.argmax(u_loc))
         pick_glob = int(np.argmax(u_glob))
         agree.append(pick_loc == pick_glob)
+        top3.append(pick_loc in set(np.argsort(-u_glob)[:3].tolist()))
         regret.append(float(u_glob[pick_glob] - u_glob[pick_loc]))
         known = len([j for j in gossip.views[i].pos if j != i])
         info_frac.append(known / n_others)
     return {"rank_agreement": float(np.mean(agree)),
+            "top3_agreement": float(np.mean(top3)),
             "regret_mean": float(np.mean(regret)),
             "regret_max": float(np.max(regret)), "n_sample": int(len(sample)),
             "info_fraction": float(np.mean(info_frac))}

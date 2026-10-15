@@ -87,6 +87,7 @@ import time
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -224,6 +225,33 @@ def unit_key(**params) -> str:
     return hashlib.sha1(blob).hexdigest()[:16]
 
 
+def _stream_seed(*parts) -> int:
+    """64-bit seed derived from the parameters themselves (SHA-256), never from hash()."""
+    blob = json.dumps([str(p) for p in parts]).encode("utf-8")
+    return int(hashlib.sha256(blob).hexdigest()[:16], 16)
+
+
+def seed_streams(testbed: str, n_nodes: int, seed: int, algo: str) -> Dict[str, np.random.Generator]:
+    """Common random numbers across algorithms and scenarios.
+
+    Four independent PCG64 streams. `deploy` (initial deployment), `scenario` (which nodes
+    fail and when, flash-crowd centre) and `adversary` (which nodes lie, what they report)
+    depend on (testbed, n, seed) only, so every algorithm and every scenario of a given
+    (testbed, n, seed) starts from the same deployment, suffers the same events and faces the
+    same attacker. `algo` additionally depends on the algorithm name, so the byzantine and
+    static runs of one algorithm also share its own decision randomness and differ only in the
+    falsified messages. v1.0 seeded one stream from Python's per-process hash() of the unit
+    key, which made units irreproducible across interpreters and unpaired across algorithms.
+    """
+    base = (str(testbed), int(n_nodes), int(seed))
+    return {
+        "deploy": np.random.default_rng(_stream_seed("deploy", *base)),
+        "scenario": np.random.default_rng(_stream_seed("scenario", *base)),
+        "adversary": np.random.default_rng(_stream_seed("adversary", *base)),
+        "algo": np.random.default_rng(_stream_seed("algo", *base, str(algo))),
+    }
+
+
 class Ledger:
     """One-file-per-unit result store with resume support."""
 
@@ -256,7 +284,7 @@ class Ledger:
 class RunCheckpointer:
     """Mid-run checkpointing, including RNG state, for long single runs."""
 
-    VERSION = 2
+    VERSION = 3
 
     def __init__(self, key: str, ckpt_every: int = 50, enabled: bool = True):
         self.path = DIRS["ckpt"] / (key + ".pkl")
@@ -458,7 +486,7 @@ def load_eua_melbcbd(max_devices: int = 600, seed: int = 0) -> Testbed:
 
 
 # %%
-def load_geolife(max_users: int = 50, grid_m: float = 400.0, slot_min: int = 60,
+def load_geolife(max_users: Optional[int] = None, grid_m: float = 400.0, slot_min: int = 60,
                  top_cells: int = 400, roi_km: float = 12.0) -> Testbed:
     """GeoLife v1.3 -> real time-varying demand field over central Beijing.
 
@@ -466,7 +494,8 @@ def load_geolife(max_users: int = 50, grid_m: float = 400.0, slot_min: int = 60,
     `slot_min` minutes, pooled across all days. The busiest `top_cells` cells become the
     device field; each cell's per-slot point count is its demand weight.
     """
-    tag = "geolife_u{}_g{:.0f}_s{}_c{}".format(max_users, grid_m, slot_min, top_cells)
+    tag = "geolife_u{}_g{:.0f}_s{}_c{}".format("all" if max_users is None else max_users,
+                                                 grid_m, slot_min, top_cells)
     cache = DIRS["cache"] / (tag + ".npz")
     if cache.exists():
         z = np.load(cache, allow_pickle=True)
@@ -488,9 +517,12 @@ def load_geolife(max_users: int = 50, grid_m: float = 400.0, slot_min: int = 60,
         by_user: Dict[str, List[str]] = {}
         for name in plts:
             parts = name.split("/")
-            uid = parts[1] if len(parts) > 2 else "000"
+            # paths look like "Geolife Trajectories 1.3/Data/<user>/Trajectory/<file>.plt";
+            # v1.0 took parts[1], which is the literal "Data" for every file, so the user cap
+            # never applied (all 182 users were read) and the manifest reported 1 user
+            uid = parts[parts.index("Data") + 1] if "Data" in parts[:-1] else "000"
             by_user.setdefault(uid, []).append(name)
-        users = sorted(by_user)[:max_users]
+        users = sorted(by_user) if max_users is None else sorted(by_user)[:max_users]
         files = [f for u in users for f in by_user[u]]
 
         for name in tqdm(files, desc="GeoLife .plt", unit="file"):
@@ -579,7 +611,7 @@ print(TESTBEDS["MEL"].describe())
 
 try:
     TESTBEDS["BEJ"] = load_geolife(
-        max_users=25 if QUICK else 60,
+        max_users=None,                 # all 182 users (see the parser note above)
         grid_m=400.0,
         slot_min=60 if QUICK else 30,
         top_cells=250 if QUICK else 500,
@@ -659,6 +691,7 @@ class UAVPower:
     P_cpu_idle: float = 4.0  # idle compute power (W)
     P_cpu_busy: float = 12.0 # additional compute power at full load (W)
     battery_Wh: float = 275.0
+    loiter: bool = True      # station-keeping by loitering at V_me rather than hovering (v2)
 
     def propulsion(self, V):
         V = np.asarray(V, dtype=np.float64)
@@ -672,13 +705,32 @@ class UAVPower:
     def P_hover(self) -> float:
         return float(self.P0 + self.Pi)
 
-    def flight_energy(self, dist_m, dt_s: float):
-        """Energy (J) to travel `dist_m` within a step of `dt_s`, hovering for the remainder.
+    @cached_property
+    def V_me(self) -> float:
+        """Maximum-endurance speed: the speed that minimises propulsion power."""
+        V = np.linspace(0.0, self.V_max, 20001)
+        return float(V[int(np.argmin(self.propulsion(V)))])
 
-        The UAV flies at the slowest speed that covers the distance in time, capped at
-        `V_max`; slower flight is cheaper per second but the step budget is fixed.
+    @property
+    def P_me(self) -> float:
+        return float(self.propulsion(self.V_me))
+
+    def flight_energy(self, dist_m, dt_s: float):
+        """Energy (J) to travel `dist_m` within a step of `dt_s`.
+
+        v2 (loiter=True): the UAV flies the whole step at speed max(d/dt, V_me), capped at
+        V_max; a node that needs to cover less than V_me*dt (staying put included) loiters at
+        the maximum-endurance speed V_me instead of hovering, because hovering costs more
+        (P(0) = 168.5 W against P(V_me) = 126.0 W with the paper's parameters). The slot energy
+        is therefore non-decreasing in the distance and minimal for staying, which is what
+        makes a stationary configuration a possible rest point of the dynamics (T1).
+
+        loiter=False reproduces v1.0: fly at the slowest sufficient speed, hover for the rest.
         """
         dist = np.asarray(dist_m, dtype=np.float64)
+        if self.loiter:
+            V = np.clip(np.maximum(dist / max(dt_s, 1e-9), self.V_me), 0.0, self.V_max)
+            return self.propulsion(V) * dt_s
         v_need = dist / max(dt_s, 1e-9)
         V = np.clip(v_need, 0.0, self.V_max)
         t_fly = np.where(V > 1e-9, dist / np.maximum(V, 1e-9), 0.0)
@@ -706,6 +758,10 @@ print("P(0)          = {:.2f} W   (P0 + Pi = {:.2f} W)".format(_hover, UAV.P_hov
 print("min power at V= {:.1f} m/s -> {:.2f} W".format(_v_opt, float(_P.min())))
 print("battery       = {:.0f} Wh = {:.0f} kJ -> {:.1f} min of hover".format(
     UAV.battery_Wh, UAV.battery_Wh * 3600 / 1000, UAV.battery_Wh * 3600 / UAV.P_hover / 60))
+print("loiter (v2)   : V_me = {:.2f} m/s, P(V_me) = {:.2f} W; a station-keeping node loiters "
+      "at V_me, so staying is the cheapest move".format(UAV.V_me, UAV.P_me))
+_e = UAV.flight_energy(np.array([0.0, 120.0, 306.0, 400.0, 600.0]), 30.0)
+assert np.all(np.diff(_e) >= -1e-9), "slot energy must be non-decreasing in distance"
 
 fig, ax = plt.subplots(figsize=(5.2, 3.0))
 ax.plot(_V, _P)
@@ -1047,12 +1103,13 @@ class GossipLayer:
     """Push-pull gossip for neighbour discovery and demand hints, with real byte accounting."""
 
     def __init__(self, n_nodes: int, R_comm: float, fanout: int = 3, ttl: int = 4,
-                 max_nbr_ids: int = 12):
+                 max_nbr_ids: int = 12, max_view: Optional[int] = 12):
         self.n = n_nodes
         self.R_comm = R_comm
         self.fanout = fanout
         self.ttl = ttl
-        self.max_nbr_ids = max_nbr_ids
+        self.max_nbr_ids = max_nbr_ids      # neighbour ids carried on the wire (uint8 count)
+        self.max_view = max_view            # beacon-side bound on the local view; None = unbounded
         self.views = [LocalView() for _ in range(n_nodes)]
         self.seq = np.zeros(n_nodes, dtype=np.int64)
         self.bytes_total = 0
@@ -1141,9 +1198,9 @@ class GossipLayer:
         # is a realism fix as much as a performance one.
         for i in np.flatnonzero(alive):
             cand = nbrs[i]
-            if cand.size > self.max_nbr_ids:
+            if self.max_view is not None and cand.size > self.max_view:
                 d2 = ((pos[cand] - pos[i][None, :]) ** 2).sum(1)
-                cand = cand[np.argsort(d2)[: self.max_nbr_ids]]
+                cand = cand[np.argsort(d2)[: self.max_view]]
             v = self.views[i]
             for j in cand:
                 j = int(j)
@@ -1168,6 +1225,10 @@ class GossipLayer:
         v.demand_hint[sid] = hint
         v.nbrs_of[sid] = ids
         v.last_seen[sid] = rnd
+
+    def view_sizes(self) -> np.ndarray:
+        """Number of other nodes each node currently knows about (its local view)."""
+        return np.array([len(v.pos) for v in self.views], dtype=np.int64)
 
     def stats(self) -> dict:
         rounds = max(len(self.per_round), 1)
@@ -1278,7 +1339,9 @@ def local_utility(env: Environment, i: int, cands: np.ndarray, pos: np.ndarray,
             conn_gain[c] = _largest_component_size(adj, nbr_ids + [i]) - without_i
 
     # --- own energy --------------------------------------------------------
-    dist = np.linalg.norm(cands - prev[i][None, :], axis=1)
+    # flight energy of the move this node is deciding now: from its CURRENT position
+    # (v1.0 used prev[i], the position one slot earlier)
+    dist = np.linalg.norm(cands - pos[i][None, :], axis=1)
     e_fly = env.uav.flight_energy(dist, env.dt_s)
     e_cpu = env.uav.compute_energy(
         np.clip(cov_gain / max(env.W_total / max(env.n_nodes, 1), 1e-9), 0, 1), env.dt_s)
@@ -1385,6 +1448,8 @@ class FogFieldBR(Controller):
         self.p_activate = p_activate
         self.inertia = inertia
         self.max_actions = max_actions
+        self.t_decide = 0.0          # seconds spent evaluating local utilities
+        self.n_decide = 0            # node-decisions made (for the view-bound measurement)
 
     def step(self, env, ctx):
         target = ctx.pos.copy()
@@ -1394,10 +1459,17 @@ class FogFieldBR(Controller):
             if ctx.rng.random() < self.inertia:
                 continue
             cands = env.action_set(ctx.pos[i], self.max_actions)
+            t0 = time.perf_counter()
             u = local_utility(env, i, cands, ctx.pos, ctx.prev,
                               ctx.gossip.views[i], ctx.w,
                               _sensed_devices(env, ctx.pos[i]))
-            target[i] = cands[int(np.argmax(u))]
+            self.t_decide += time.perf_counter() - t0
+            self.n_decide += 1
+            best = int(np.argmax(u))
+            here = np.flatnonzero(np.all(np.abs(cands - ctx.pos[i][None, :]) < 1e-6, axis=1))
+            if here.size and u[here[0]] >= u[best] - 1e-12:
+                best = int(here[0])          # ties go to staying, so rest points are absorbing
+            target[i] = cands[best]
         return _apply_move(env, ctx.pos, target, ctx.alive)
 
 
@@ -1553,7 +1625,7 @@ class ConsensusADMM(Controller):
             g = (coef[:, None] * (d / r[:, None])).sum(axis=0)
         # movement penalty pulls back toward where the node already is
         g -= (env.weights.energy / max(env.weights.coverage, 1e-9)) * \
-            (x - ctx.prev[i]) / max(env.max_step, 1e-9)
+            (x - ctx.pos[i]) / max(env.max_step, 1e-9)
         n = float(np.linalg.norm(g))
         return g / n if n > 1e-12 else np.zeros(2)
 
@@ -1730,14 +1802,26 @@ class DPOAStyleSwarm(Controller):
         self.pbest_f = np.full(P, -np.inf)
 
     def step(self, env, ctx):
+        # environmental change (v2): a new demand field re-initialises the swarm around the
+        # current configuration, as D-POA does on detected change
+        w_last = getattr(self, "_w_last", None)
+        if w_last is not None and (w_last.shape != ctx.w.shape or not np.array_equal(w_last, ctx.w)):
+            self.swarm = None
+        self._w_last = np.array(ctx.w, copy=True)
         if self.swarm is None or self.swarm.shape[1] != ctx.pos.shape[0]:
             self._init_swarm(env, ctx.pos, ctx.rng)
+        elif self.pbest_f is not None and np.isfinite(self.pbest_f).any():
+            # re-evaluate the memory under this slot's demand and origin (v2): without it the
+            # swarm chases optima remembered from earlier demand slots
+            for p in range(self.n_particles):
+                cand = _apply_move(env, ctx.pos, self.pbest[p], ctx.alive)
+                self.pbest_f[p] = env.phi(cand, ctx.pos, ctx.alive, ctx.w)
         rng = ctx.rng
         for _ in range(self.inner):
             fits = np.empty(self.n_particles)
             for p in range(self.n_particles):
                 cand = _apply_move(env, ctx.pos, self.swarm[p], ctx.alive)
-                fits[p] = env.phi(cand, ctx.prev, ctx.alive, ctx.w)
+                fits[p] = env.phi(cand, ctx.pos, ctx.alive, ctx.w)
             better = fits > self.pbest_f
             self.pbest[better] = self.swarm[better]
             self.pbest_f[better] = fits[better]
@@ -1753,7 +1837,8 @@ class DPOAStyleSwarm(Controller):
         return _apply_move(env, ctx.pos, gbest, ctx.alive)
 
     def on_event(self):
-        """Dynamic re-initialisation, as D-POA does on topology change."""
+        """Dynamic re-initialisation, as D-POA does on topology change (and, in v2, on a
+        change of the demand field, see step)."""
         self.swarm = None
         self.pbest_f = None
 
@@ -1805,14 +1890,24 @@ print("decentralized:", ", ".join(DECENTRALIZED))
 # | `expansion` | new nodes join the network twice during the run |
 # | `catastrophic` | 50% of nodes fail simultaneously at the midpoint |
 # | `flash_crowd` | demand in a disc is multiplied for a window |
-# | `seed_loss` | the bootstrap/seed node is removed at the midpoint |
+# | `seed_loss` | one node (the bootstrap/seed node) is removed at the midpoint |
 # | `byzantine` | a fraction of nodes gossip falsified positions and demand hints |
+# | `controller_loss` | the centralised controller dies at the midpoint; a demand surge follows |
+# | `late_surge` | the same demand surge with nobody dying: the control twin of `controller_loss` |
 #
-# **On `seed_loss`.** FogField has no controller, so "controller-loss recovery" has no
-# referent. The plan's reinterpretation is used instead: kill the **bootstrap/seed node**
-# that new joiners rendezvous with, and measure re-convergence. Centralized baselines are
-# not exempt from this scenario - losing the coordinator is exactly where they should suffer,
-# and that contrast is the point of the experiment.
+# **On `controller_loss` (added in v2).** The single point of failure that motivates a
+# decentralised scheme is the controller, so this scenario removes it: from the midpoint on,
+# the D-POA-style controller issues no commands and its nodes hold their last commanded
+# position. Decentralised methods have no controller and are untouched by the event itself.
+# A localised demand surge starts ten rounds after the loss so that the post-loss period
+# contains a demand change on both testbeds (MEL demand is otherwise static, and a frozen but
+# converged deployment would lose nothing). While the controller is alive its uplink is
+# accounted as a *modelled* cost under the same codec: one 21-byte state report per live
+# node per slot in, one 10-byte position command per node out.
+#
+# **On `seed_loss`.** v1.0 presented this as the controller-loss proxy. It is not: it removes
+# one node at the midpoint, nobody needs a bootstrap node after round 0, and the ledger shows
+# it has no measurable effect on any method. It is kept, as a single-node-loss null scenario.
 #
 # **On `mobility` for MEL.** The EUA testbed is a single static snapshot, so on MEL mobility
 # is emulated by a travelling demand hotspot and is **flagged `synthetic_dynamics=True`** in
@@ -1835,8 +1930,16 @@ SCENARIOS = {
     "expansion": Scenario("expansion", "new nodes join twice"),
     "catastrophic": Scenario("catastrophic", "50% simultaneous node loss at the midpoint"),
     "flash_crowd": Scenario("flash_crowd", "localised demand surge for a window"),
-    "seed_loss": Scenario("seed_loss", "bootstrap/seed node removed at the midpoint"),
+    "seed_loss": Scenario("seed_loss", "one node (the bootstrap/seed node) removed at the midpoint"),
     "byzantine": Scenario("byzantine", "a fraction of nodes gossip falsified state"),
+    "controller_loss": Scenario("controller_loss",
+                                "centralised controller dies at the midpoint; demand surge follows"),
+    "late_surge": Scenario("late_surge",
+                           "demand surge ten rounds after the midpoint (control twin of controller_loss)"),
+    "ctrl_fail": Scenario("ctrl_fail", "controller dies at the midpoint; node failures (1%/slot) follow"),
+    "late_fail": Scenario("late_fail", "node failures (1%/slot) from the midpoint (twin of ctrl_fail)"),
+    "ctrl_drift": Scenario("ctrl_drift", "controller dies at the midpoint; a demand hotspot sweeps the region"),
+    "late_drift": Scenario("late_drift", "demand hotspot sweeps the region from the midpoint (twin of ctrl_drift)"),
 }
 
 P_FAIL = 0.010
@@ -1845,19 +1948,33 @@ BYZ_FRACTION = 0.15
 
 
 class ScenarioEngine:
-    """Turns a scenario key into per-round mutations of the simulation state."""
+    """Turns a scenario key into per-round mutations of the simulation state.
+
+    Two random streams, both seeded by (testbed, n, seed) only (common random numbers, v2):
+    `rng` drives the scenario itself (flash-crowd centre, which nodes fail and when) and
+    `rng_adv` drives the Byzantine adversary (which nodes lie and what they report). Every
+    algorithm therefore faces the same events and the same attacker, and the byzantine and
+    static runs of one algorithm differ only in the falsified messages.
+    """
 
     def __init__(self, scenario: str, env: Environment, rounds: int,
-                 rng: np.random.Generator):
+                 rng: np.random.Generator, rng_adv: Optional[np.random.Generator] = None):
         self.key = scenario
         self.env = env
         self.rounds = rounds
+        self.rng = rng
+        self.rng_adv = rng_adv if rng_adv is not None else rng
         self.events: List[Tuple[int, str]] = []
         tb = env.testbed
         x0, x1, y0, y1 = tb.bounds
         self.flash_centre = np.array([0.5 * (x0 + x1), 0.5 * (y0 + y1)])
         self.flash_centre += rng.normal(0, 0.18 * (x1 - x0), 2)
-        self.flash_window = (rounds // 3, rounds // 3 + max(6, rounds // 6))
+        if scenario in ("controller_loss", "late_surge"):
+            # the surge starts ten rounds after the (possible) controller loss
+            lo = rounds // 2 + 10
+        else:
+            lo = rounds // 3
+        self.flash_window = (lo, lo + max(6, rounds // 6))
         self.hotspot_path = np.stack([
             np.linspace(x0, x1, max(rounds, 2)),
             y0 + (y1 - y0) * (0.5 + 0.35 * np.sin(np.linspace(0, 2 * np.pi, max(rounds, 2)))),
@@ -1865,7 +1982,17 @@ class ScenarioEngine:
         self.byz_mask = np.zeros(env.n_nodes, dtype=bool)
         if scenario == "byzantine":
             k = max(1, int(round(BYZ_FRACTION * env.n_nodes)))
-            self.byz_mask[rng.choice(env.n_nodes, k, replace=False)] = True
+            self.byz_mask[self.rng_adv.choice(env.n_nodes, k, replace=False)] = True
+
+    def controller_dead(self, rnd: int) -> bool:
+        return self.key in ("controller_loss", "ctrl_fail", "ctrl_drift") and rnd >= self.rounds // 2
+
+    def drift_centre(self, rnd: int) -> np.ndarray:
+        """Hotspot centre for the drift scenarios: two sweeps over the second half of the run."""
+        x0, x1, y0, y1 = self.env.testbed.bounds
+        u = 2.0 * (rnd - self.rounds // 2) / max(self.rounds - self.rounds // 2, 1)
+        return np.array([x0 + (x1 - x0) * (u % 1.0),
+                         y0 + (y1 - y0) * (0.5 + 0.35 * math.sin(2.0 * math.pi * u))])
 
     # ---- demand ------------------------------------------------------------
     def weights(self, rnd: int) -> np.ndarray:
@@ -1883,7 +2010,12 @@ class ScenarioEngine:
         else:
             w = tb.weights(0 if tb.n_slots == 1 else rnd)
 
-        if self.key == "flash_crowd":
+        if self.key in ("ctrl_drift", "late_drift") and rnd >= self.rounds // 2:
+            c = self.drift_centre(rnd)
+            d2 = ((tb.device_xy - c[None, :]) ** 2).sum(1)
+            w = w * (1.0 + 3.0 * np.exp(-d2 / (2 * (0.75 * self.env.R_cov) ** 2)))
+
+        if self.key in ("flash_crowd", "controller_loss", "late_surge"):
             lo, hi = self.flash_window
             if lo <= rnd < hi:
                 d2 = ((tb.device_xy - self.flash_centre[None, :]) ** 2).sum(1)
@@ -1892,8 +2024,8 @@ class ScenarioEngine:
         return np.ascontiguousarray(w, dtype=np.float64)
 
     # ---- topology ----------------------------------------------------------
-    def apply_topology(self, rnd: int, alive: np.ndarray, joined: np.ndarray,
-                       rng: np.random.Generator) -> str:
+    def apply_topology(self, rnd: int, alive: np.ndarray, joined: np.ndarray) -> str:
+        rng = self.rng
         ev = ""
         live = np.flatnonzero(alive)
         if self.key == "random_failures" and live.size > 2:
@@ -1911,6 +2043,19 @@ class ScenarioEngine:
             if seed_node >= 0:
                 alive[seed_node] = False
                 ev = "seed_loss:{}".format(seed_node)
+        elif self.key == "controller_loss" and rnd == self.rounds // 2:
+            ev = "controller_loss"
+        elif self.key in ("ctrl_fail", "late_fail") and rnd >= self.rounds // 2:
+            draw = rng.random(live.size)              # drawn in both twins, so the streams match
+            if live.size > 2:
+                die = live[draw < P_FAIL]
+                if die.size:
+                    alive[die] = False
+                    ev = "fail:{}".format(die.size)
+            if self.key == "ctrl_fail" and rnd == self.rounds // 2:
+                ev = "controller_loss" + ("+" + ev if ev else "")
+        elif self.key in ("ctrl_drift",) and rnd == self.rounds // 2:
+            ev = "controller_loss"
         elif self.key == "expansion":
             for frac in (0.33, 0.66):
                 if rnd == int(self.rounds * frac):
@@ -1931,8 +2076,15 @@ class ScenarioEngine:
 #
 # One call to `simulate` is one **work unit**. It checkpoints every `ckpt_every` rounds,
 # saving positions, batteries, the gossip layer with its byte counters, the controller's
-# internal state, the metric trace and **the RNG state**. If the session dies, the next call
-# with the same parameters picks up from the last checkpoint rather than round zero.
+# internal state, the metric trace and **the RNG states** (the algorithm stream explicitly,
+# the scenario and adversary streams inside the pickled engine). If the session dies, the
+# next call with the same parameters picks up from the last checkpoint rather than round zero.
+#
+# **Common random numbers (v2).** See `seed_streams`: deployment, events and adversary are
+# functions of (testbed, n, seed) alone, so comparisons across algorithms and across
+# scenarios are paired. The record also carries explicit recovery censoring, the service
+# level before and after the midpoint event, the modelled controller uplink, and the mean
+# local-view size.
 #
 # `SELFTEST_RESUME` below actually kills a run mid-way and restarts it, then checks that the
 # resumed trace matches the uninterrupted one. Checkpointing that has never been tested
@@ -1953,15 +2105,31 @@ def initial_positions(env: Environment, rng: np.random.Generator) -> np.ndarray:
     return env.snap(pos)
 
 
+CTRL_CMD_BYTES = struct.calcsize("<Hff")      # position command: node id + x + y
+
+
 def simulate(env: Environment, algo: str, scenario: str, seed: int, rounds: int,
              ckpt_every: int = 25, resume: bool = True, stop_after: Optional[int] = None,
-             progress: bool = False, return_state: bool = False) -> dict:
-    """Run one (env, algorithm, scenario, seed) unit. Resumable."""
+             progress: bool = False, return_state: bool = False,
+             init_pos: Optional[np.ndarray] = None, ctrl_kwargs: Optional[dict] = None,
+             view_cap: Optional[int] = 12) -> dict:
+    """Run one (env, algorithm, scenario, seed) unit. Resumable.
+
+    `init_pos` overrides the drawn deployment (the MILP study starts every heuristic from
+    the configuration the MILP starts from). `ctrl_kwargs` go to the controller constructor
+    (the log-linear schedule sweep). `view_cap` is the beacon-side bound on the local view
+    (None = unbounded; used only by the view-bound measurement).
+    """
+    ctrl_kwargs = dict(ctrl_kwargs or {})
     ident = dict(testbed=env.testbed.name, algo=algo, scenario=scenario, seed=seed,
                  n_nodes=env.n_nodes, rounds=rounds, R_cov=env.R_cov, R_comm=env.R_comm,
-                 cap=env.capacity, lattice=env.lattice_m, quick=QUICK)
+                 cap=env.capacity, lattice=env.lattice_m, quick=QUICK, seeding="crn-v2",
+                 init="common" if init_pos is not None else "sites",
+                 ctrl=json.dumps(ctrl_kwargs, sort_keys=True) if ctrl_kwargs else "",
+                 view_cap=view_cap)
     key = unit_key(**ident)
     ck = RunCheckpointer(key, ckpt_every, enabled=resume)
+    centralized = not ALGORITHMS[algo].decentralized
 
     saved = ck.load()
     if saved is not None:
@@ -1978,11 +2146,18 @@ def simulate(env: Environment, algo: str, scenario: str, seed: int, rounds: int,
         rng = rng_from_state(saved["rng"])
         resumed_from = rnd0
         diverged_rounds = saved.get("diverged_rounds", 0)
+        ctrl_bytes = saved.get("ctrl_bytes", 0)
+        view_sum = saved.get("view_sum", 0.0)
+        view_cnt = saved.get("view_cnt", 0)
     else:
-        rng = np.random.default_rng(abs(hash(key)) % (2 ** 32))
-        ctrl = ALGORITHMS[algo]()
-        engine = ScenarioEngine(scenario, env, rounds, rng)
-        pos = initial_positions(env, rng)
+        streams = seed_streams(env.testbed.name, env.n_nodes, seed, algo)
+        rng = streams["algo"]
+        ctrl = ALGORITHMS[algo](**ctrl_kwargs)
+        engine = ScenarioEngine(scenario, env, rounds, streams["scenario"], streams["adversary"])
+        if init_pos is not None:
+            pos = env.snap(np.asarray(init_pos, dtype=np.float64))
+        else:
+            pos = initial_positions(env, streams["deploy"])
         prev = pos.copy()
         alive = np.ones(env.n_nodes, dtype=bool)
         joined = np.ones(env.n_nodes, dtype=bool)
@@ -1991,12 +2166,15 @@ def simulate(env: Environment, algo: str, scenario: str, seed: int, rounds: int,
             joined[-hold:] = False
             alive[-hold:] = False
         battery = np.full(env.n_nodes, env.uav.battery_Wh * 3600.0)
-        gossip = GossipLayer(env.n_nodes, env.R_comm)
+        gossip = GossipLayer(env.n_nodes, env.R_comm, max_view=view_cap)
         ctrl.reset(env, pos, rng)
         trace = []
         rnd0 = 0
         resumed_from = None
         diverged_rounds = 0
+        ctrl_bytes = 0
+        view_sum = 0.0
+        view_cnt = 0
 
     t_start = time.time()
     last = min(rounds, rnd0 + stop_after) if stop_after else rounds
@@ -2004,13 +2182,20 @@ def simulate(env: Environment, algo: str, scenario: str, seed: int, rounds: int,
     if progress:
         it = tqdm(it, desc="{}/{}/{}".format(env.testbed.name, algo, scenario), leave=False)
 
+    def _state(rnd_next):
+        return {"rnd": rnd_next, "pos": pos, "prev": prev, "alive": alive, "joined": joined,
+                "battery": battery, "gossip": gossip, "ctrl": ctrl, "engine": engine,
+                "trace": trace, "rng": rng_state_of(rng), "diverged_rounds": diverged_rounds,
+                "ctrl_bytes": ctrl_bytes, "view_sum": view_sum, "view_cnt": view_cnt}
+
     for rnd in it:
         w = engine.weights(rnd)
-        ev = engine.apply_topology(rnd, alive, joined, rng)
-        if ev and hasattr(ctrl, "on_event"):
+        ev = engine.apply_topology(rnd, alive, joined)
+        ctrl_alive = not (centralized and engine.controller_dead(rnd))
+        if ev and ctrl_alive and hasattr(ctrl, "on_event"):
             ctrl.on_event()
 
-        # gossip: byzantine nodes report falsified state on the wire
+        # gossip: byzantine nodes report falsified state on the wire (adversary stream)
         pos_report = pos.copy()
         hint = np.zeros(env.n_nodes)
         for i in np.flatnonzero(alive):
@@ -2019,30 +2204,40 @@ def simulate(env: Environment, algo: str, scenario: str, seed: int, rounds: int,
         if engine.byz_mask.any():
             b = engine.byz_mask & alive
             x0, x1, y0, y1 = env.testbed.bounds
-            pos_report[b] = np.stack([rng.uniform(x0, x1, b.sum()),
-                                      rng.uniform(y0, y1, b.sum())], axis=1)
+            adv = engine.rng_adv
+            pos_report[b] = np.stack([adv.uniform(x0, x1, b.sum()),
+                                      adv.uniform(y0, y1, b.sum())], axis=1)
             hint[b] = hint.max() * 3.0 if hint.max() > 0 else 1.0
 
         nbrs = gossip.round(rnd, pos, alive, battery, hint, rng, pos_report=pos_report)
+        view_sum += float(gossip.view_sizes()[alive].sum())
+        view_cnt += int(alive.sum())
 
         ctx = StepContext(rnd=rnd, pos=pos, prev=prev, alive=alive, w=w, nbrs=nbrs,
                           gossip=gossip, rng=rng, byzantine=engine.byz_mask)
-        # A controller's own numerical failure (e.g. an iterative baseline diverging at a
-        # node count/density it wasn't tuned for) must degrade to "no move this round" for
-        # the affected nodes, not crash a multi-hour queue over one flaky baseline unit.
-        # Observed in practice: Consensus-ADMM overflowed to NaN at n=800 before its dual
-        # variables were clipped (see ConsensusADMM.step) - this is the second line of
-        # defence, for whatever the next such case turns out to be.
-        try:
-            new_pos = ctrl.step(env, ctx)
-            if not np.all(np.isfinite(new_pos)):
-                raise FloatingPointError("controller produced non-finite positions")
-        except Exception as exc:
-            diverged_rounds += 1
-            if diverged_rounds <= 3 or diverged_rounds % 50 == 0:
-                print("[diverge] {}/{}/{} round {}: {} ({}) - holding position this round"
-                     .format(env.testbed.name, algo, scenario, rnd, type(exc).__name__, exc))
+        if not ctrl_alive:
+            # the controller is gone: nodes hold their last commanded positions
             new_pos = pos.copy()
+        else:
+            # A controller's own numerical failure (e.g. an iterative baseline diverging at
+            # a node count/density it wasn't tuned for) must degrade to "no move this round"
+            # for the affected nodes, not crash a multi-hour queue over one flaky baseline
+            # unit. Observed in practice: Consensus-ADMM overflowed to NaN at n=800 before
+            # its dual variables were clipped (see ConsensusADMM.step) - this is the second
+            # line of defence, for whatever the next such case turns out to be.
+            try:
+                new_pos = ctrl.step(env, ctx)
+                if not np.all(np.isfinite(new_pos)):
+                    raise FloatingPointError("controller produced non-finite positions")
+            except Exception as exc:
+                diverged_rounds += 1
+                if diverged_rounds <= 3 or diverged_rounds % 50 == 0:
+                    print("[diverge] {}/{}/{} round {}: {} ({}) - holding position this round"
+                         .format(env.testbed.name, algo, scenario, rnd, type(exc).__name__, exc))
+                new_pos = pos.copy()
+            if centralized:
+                # modelled controller uplink: one state report in, one command out, per node
+                ctrl_bytes += int(alive.sum()) * (_HDR.size + CTRL_CMD_BYTES)
 
         # energy accounting and battery depletion
         dist = np.linalg.norm(new_pos - pos, axis=1)
@@ -2064,23 +2259,21 @@ def simulate(env: Environment, algo: str, scenario: str, seed: int, rounds: int,
             "event": ev, "energy_step_J": float(spent.sum()), **parts,
         })
 
-        ck.maybe_save(rnd + 1, {
-            "rnd": rnd + 1, "pos": pos, "prev": prev, "alive": alive, "joined": joined,
-            "battery": battery, "gossip": gossip, "ctrl": ctrl, "engine": engine,
-            "trace": trace, "rng": rng_state_of(rng), "diverged_rounds": diverged_rounds,
-        })
+        ck.maybe_save(rnd + 1, _state(rnd + 1))
 
     if stop_after and last < rounds:
-        ck.maybe_save(last, {
-            "rnd": last, "pos": pos, "prev": prev, "alive": alive, "joined": joined,
-            "battery": battery, "gossip": gossip, "ctrl": ctrl, "engine": engine,
-            "trace": trace, "rng": rng_state_of(rng), "diverged_rounds": diverged_rounds,
-        }, force=True)
+        ck.maybe_save(last, _state(last), force=True)
         return {"_partial": True, "rounds_done": last, "key": key}
 
     df = pd.DataFrame(trace)
     tail = max(1, len(df) // 5)
     final = df.tail(tail)
+    phi_arr = df["phi"].to_numpy()
+    cov_arr = df["coverage_frac"].to_numpy()
+    mid = rounds // 2
+    tail_mid = max(1, (len(phi_arr) - mid) // 3)
+    rec_ev = recovery_events(df, engine.events)
+    n_dec = int(getattr(ctrl, "n_decide", 0))
     rec = dict(ident)
     rec.update({
         "key": key,
@@ -2093,12 +2286,27 @@ def simulate(env: Environment, algo: str, scenario: str, seed: int, rounds: int,
         "alive_final": int(df["alive"].iloc[-1]),
         "convergence_round": convergence_round(df["phi"].to_numpy()),
         "recovery_rounds": recovery_time(df, engine.events),
+        "recovery_censored": (float(np.mean([not e["recovered"] for e in rec_ev]))
+                              if rec_ev else None),
+        "recovery_events": rec_ev,
+        "phi_pre_mid": float(np.mean(phi_arr[max(0, mid - 5):mid])) if mid > 0 else None,
+        "phi_post_mid": float(np.mean(phi_arr[mid:])),
+        "phi_post_tail": float(np.mean(phi_arr[-tail_mid:])),
+        "cov_post_tail": float(np.mean(cov_arr[-tail_mid:])),
+        "ctrl_bytes_total": int(ctrl_bytes),
+        "ctrl_bytes_per_round": float(ctrl_bytes / max(len(df), 1)),
+        "ctrl_bytes_per_node_round": float(ctrl_bytes / max(len(df), 1) / max(env.n_nodes, 1)),
+        "view_size_mean": float(view_sum / max(view_cnt, 1)),
+        "decide_s_per_node": (float(ctrl.t_decide / n_dec) if n_dec else None),
+        "ctrl_kwargs": ctrl_kwargs,
         "wallclock_s": float(time.time() - t_start),
         "diverged_rounds": int(diverged_rounds),
         "decentralized": bool(ALGORITHMS[algo].decentralized),
         "synthetic_dynamics": bool(scenario == "mobility" and env.testbed.n_slots == 1),
         "events": ["{}@{}".format(e, r) for r, e in engine.events],
         "trace_phi": [round(float(v), 6) for v in df["phi"].tolist()],
+        "trace_cov": [round(float(v), 5) for v in df["coverage_frac"].tolist()],
+        "energy_node_max_J": float(np.max(env.uav.battery_Wh * 3600.0 - battery)),
         "final_pos": pos.tolist(),
         "final_prev": prev.tolist(),
         "final_alive": alive.tolist(),
@@ -2126,24 +2334,42 @@ def convergence_round(phi: np.ndarray, tol: float = 0.01) -> int:
     return int(len(phi))
 
 
-def recovery_time(df: pd.DataFrame, events: List[Tuple[int, str]]) -> Optional[float]:
-    """Mean rounds to return to 95% of the pre-event phi after a disruptive event."""
-    if not events:
-        return None
+def recovery_events(df: pd.DataFrame, events: List[Tuple[int, str]],
+                    frac: float = 0.95) -> List[dict]:
+    """Per event: rounds until phi regains `frac` of its pre-event level, with censoring.
+
+    A unit that never regains the level before the horizon is *censored*: `recovered` is
+    False and `rounds` equals the remaining horizon. v1.0 silently reported the horizon as if
+    it were a recovery time; the analysis must treat censored units as such.
+    """
     phi = df["phi"].to_numpy()
-    outs = []
-    for r, _ev in events:
+    out = []
+    for r, ev in events:
         if r <= 0 or r >= len(phi) - 2:
             continue
         pre = float(np.mean(phi[max(0, r - 5):r]))
-        thresh = 0.95 * pre if pre > 0 else pre * 1.05
-        rec = None
+        thresh = frac * pre if pre > 0 else pre * (2.0 - frac)
+        hit = None
         for t in range(r, len(phi)):
             if phi[t] >= thresh:
-                rec = t - r
+                hit = t - r
                 break
-        outs.append(rec if rec is not None else len(phi) - r)
-    return float(np.mean(outs)) if outs else None
+        horizon = len(phi) - r
+        out.append({"round": int(r), "event": str(ev), "pre_phi": pre,
+                    "recovered": bool(hit is not None),
+                    "rounds": int(hit if hit is not None else horizon),
+                    "horizon": int(horizon),
+                    "post_phi_mean": float(np.mean(phi[r:]))})
+    return out
+
+
+def recovery_time(df: pd.DataFrame, events: List[Tuple[int, str]]) -> Optional[float]:
+    """Mean rounds to return to 95% of the pre-event phi; censored events count the horizon.
+
+    Kept for continuity with v1.0; read it together with `recovery_censored`.
+    """
+    ev = recovery_events(df, events)
+    return float(np.mean([e["rounds"] for e in ev])) if ev else None
 # %% [markdown]
 # ## 13 - Self-test: does resume actually work?
 #
@@ -2160,15 +2386,23 @@ def selftest_resume(verbose: bool = True) -> dict:
     env = Environment(TESTBEDS["MEL"], n_nodes=8, lattice_m=150.0)
     common = dict(env=env, algo="FogField-LLL", scenario="static", rounds=24, ckpt_every=4)
 
-    # (1) clean, uninterrupted reference run
-    ref = simulate(seed=901, resume=False, **common)
+    # A private checkpoint folder: parallel grid workers each run this self-test at start-up,
+    # and must neither race on the same checkpoint file nor delete each other's checkpoints.
+    import shutil
+    shared_ckpt = DIRS["ckpt"]
+    DIRS["ckpt"] = shared_ckpt / "selftest_{}".format(os.getpid())
+    DIRS["ckpt"].mkdir(parents=True, exist_ok=True)
+    try:
+        # (1) clean, uninterrupted reference run
+        ref = simulate(seed=901, resume=False, **common)
 
-    # (2) same unit, killed after 9 rounds, then resumed
-    for f in DIRS["ckpt"].glob("*.pkl"):
-        f.unlink()
-    part = simulate(seed=901, resume=True, stop_after=9, **common)
-    assert part.get("_partial"), "stop_after should have produced a partial result"
-    resumed = simulate(seed=901, resume=True, **common)
+        # (2) same unit, killed after 9 rounds, then resumed
+        part = simulate(seed=901, resume=True, stop_after=9, **common)
+        assert part.get("_partial"), "stop_after should have produced a partial result"
+        resumed = simulate(seed=901, resume=True, **common)
+    finally:
+        shutil.rmtree(DIRS["ckpt"], ignore_errors=True)
+        DIRS["ckpt"] = shared_ckpt
 
     a = np.asarray(ref["trace_phi"])
     b = np.asarray(resumed["trace_phi"])
@@ -2216,12 +2450,25 @@ import pulp
 
 
 def phi_reduced(env: Environment, pos, prev, active, w) -> float:
-    """Coverage minus energy only - the objective the MILP bounds."""
+    """Coverage minus energy (flight plus load-dependent compute), no connectivity."""
     cov = env.coverage(pos, active, w)
     ene = env.energy(pos, prev, active, w)
     N = float(env.n_nodes)
     return float(env.weights.coverage * cov / max(env.W_total, 1e-9)
                  - env.weights.energy * ene / (N * env.E_ref))
+
+
+def phi_subgame(env: Environment, pos, origin, active, w) -> float:
+    """The objective of the coverage-energy sub-game (Theorem T3) and of the MILP (v2):
+    coverage minus flight energy from `origin`, with compute energy held at its idle level."""
+    cov = env.coverage(pos, active, w)
+    idx = np.flatnonzero(active)
+    e_fly = float(np.sum(env.uav.flight_energy(np.linalg.norm(pos[idx] - origin[idx], axis=1),
+                                               env.dt_s)))
+    e_idle = float(idx.size * env.uav.P_cpu_idle * env.dt_s)
+    N = float(env.n_nodes)
+    return float(env.weights.coverage * cov / max(env.W_total, 1e-9)
+                 - env.weights.energy * (e_fly + e_idle) / (N * env.E_ref))
 
 
 def solve_milp(env: Environment, prev: np.ndarray, w: np.ndarray,
@@ -2230,19 +2477,16 @@ def solve_milp(env: Environment, prev: np.ndarray, w: np.ndarray,
     tb = env.testbed
     N = env.n_nodes
 
-    # candidate cells: the union of the nodes' reachable sets, capped for tractability
-    cells = np.unique(np.vstack([env.action_set(prev[i], max_actions=40)
-                                 for i in range(N)]), axis=0)
-    if len(cells) > lattice_cap:
-        sel = np.linspace(0, len(cells) - 1, lattice_cap).astype(int)
-        cells = cells[sel]
+    # candidate cells (v2): EVERY lattice cell, for every node. Heuristic configurations live
+    # on the same lattice, so each of them is MILP-feasible and the optimum is an exact upper
+    # bound on the sub-game objective. v1.0 subsampled at most `lattice_cap` cells from the
+    # nodes' nearest reachable sets, and heuristics occasionally beat that restricted optimum.
+    gx, gy = np.meshgrid(env.lat_x, env.lat_y, indexing="ij")
+    cells = np.stack([gx.ravel(), gy.ravel()], axis=1)
     C = len(cells)
-
-    reach = np.zeros((N, C), dtype=bool)
-    for i in range(N):
-        reach[i] = np.linalg.norm(cells - prev[i][None, :], axis=1) <= env.max_step + 1e-6
-        if not reach[i].any():
-            reach[i, int(np.argmin(np.linalg.norm(cells - prev[i][None, :], axis=1)))] = True
+    # flight energy is charged with the same capped function the scoring uses, so cells
+    # beyond one slot's reach are allowed at the capped price, exactly as in phi_subgame
+    reach = np.ones((N, C), dtype=bool)
 
     covers = ((cells[:, None, :] - tb.device_xy[None, :, :]) ** 2).sum(-1) <= env.R_cov ** 2
     e_cost = np.stack([env.uav.flight_energy(
@@ -2268,7 +2512,7 @@ def solve_milp(env: Environment, prev: np.ndarray, w: np.ndarray,
     Wt = max(env.W_total, 1e-9)
     denom = float(N) * env.E_ref
     cover_term = pulp.lpSum(env.weights.coverage * float(w[m]) / Wt * z[m] for m in z)
-    # compute energy is a constant offset here (every node is active), so only flight matters
+    # sub-game objective: compute energy at its idle level is a constant (every node active)
     energy_term = pulp.lpSum(env.weights.energy * float(e_cost[i, c]) / denom * y[(i, c)]
                              for (i, c) in y)
     prob += cover_term - energy_term
@@ -2286,16 +2530,16 @@ def solve_milp(env: Environment, prev: np.ndarray, w: np.ndarray,
 
     active = np.ones(N, dtype=bool)
     obj = pulp.value(prob.objective)
-    # add back the constant compute-energy offset so it is comparable to phi_reduced
-    e_cpu_const = float(np.sum(env.uav.compute_energy(
-        env.load_fraction(pos, active, w), env.dt_s)))
+    # subtract the constant idle compute energy so it is on the scale of phi_subgame
+    e_idle = float(N * env.uav.P_cpu_idle * env.dt_s)
     obj_comparable = (float(obj) if obj is not None else float("nan")) \
-        - env.weights.energy * e_cpu_const / denom
+        - env.weights.energy * e_idle / denom
 
     return {
         "status": status_name,
         "objective_bound": obj_comparable,
-        "objective_achieved": phi_reduced(env, pos, prev, active, w),
+        "objective_achieved": phi_subgame(env, pos, prev, active, w),
+        "objective_achieved_reduced": phi_reduced(env, pos, prev, active, w),
         "positions": pos,
         "n_cells": C,
         "n_binaries": len(y),
@@ -2364,7 +2608,7 @@ def locality_gap(env: Environment, pos, prev, active, w, gossip: GossipLayer,
     if live.size == 0:
         return {"rank_agreement": float("nan"), "regret_mean": float("nan")}
     sample = rng.choice(live, size=min(n_sample, live.size), replace=False)
-    agree, regret, info_frac = [], [], []
+    agree, regret, info_frac, top3 = [], [], [], []
     n_others = max(len(live) - 1, 1)
     for i in sample:
         i = int(i)
@@ -2381,10 +2625,12 @@ def locality_gap(env: Environment, pos, prev, active, w, gossip: GossipLayer,
         pick_loc = int(np.argmax(u_loc))
         pick_glob = int(np.argmax(u_glob))
         agree.append(pick_loc == pick_glob)
+        top3.append(pick_loc in set(np.argsort(-u_glob)[:3].tolist()))
         regret.append(float(u_glob[pick_glob] - u_glob[pick_loc]))
         known = len([j for j in gossip.views[i].pos if j != i])
         info_frac.append(known / n_others)
     return {"rank_agreement": float(np.mean(agree)),
+            "top3_agreement": float(np.mean(top3)),
             "regret_mean": float(np.mean(regret)),
             "regret_max": float(np.max(regret)), "n_sample": int(len(sample)),
             "info_fraction": float(np.mean(info_frac))}
@@ -2407,7 +2653,7 @@ def locality_gap(env: Environment, pos, prev, active, w, gossip: GossipLayer,
 # either way, because the mid-run checkpointer also holds partial units.
 
 # %%
-TIME_BUDGET_MIN = 45 if QUICK else 180
+TIME_BUDGET_MIN = float(os.environ.get("FOGFIELD_BUDGET_MIN", "50"))
 
 if QUICK:
     GRID_NODES = [20]
@@ -2443,10 +2689,23 @@ class BudgetExceeded(Exception):
 
 def run_study(name: str, units: List[dict], fn, budget_min: float = TIME_BUDGET_MIN) -> None:
     """Execute `units` through `fn`, skipping anything the ledger already holds."""
+    only = os.environ.get("FOGFIELD_STUDIES")
+    if only and name not in only.split(","):
+        print("[{}] skipped (FOGFIELD_STUDIES={})".format(name, only))
+        return
     ledger = Ledger(DIRS["results"], name)
     todo = [u for u in units if not ledger.is_done(u["_key"])]
-    print("[{}] {} unit(s) total, {} already done, {} to run"
-          .format(name, len(units), len(units) - len(todo), len(todo)))
+    # Headless parallel runs: worker k of W takes the units whose key hashes to k. The split
+    # is a function of the key alone, so workers never overlap and never leave gaps however
+    # often they are restarted; every unit is deterministic (seed_streams), so a duplicate
+    # would in any case be harmless.
+    n_workers = int(os.environ.get("FOGFIELD_NWORKERS", "1"))
+    worker = int(os.environ.get("FOGFIELD_WORKER", "0"))
+    if n_workers > 1:
+        todo = [u for u in todo if int(u["_key"], 16) % n_workers == worker]
+    print("[{}] {} unit(s) total, {} already done, {} to run{}"
+          .format(name, len(units), len(units) - len(todo), len(todo),
+                  " (worker {}/{})".format(worker, n_workers) if n_workers > 1 else ""))
     if not todo:
         return
     t0 = time.time()
@@ -2528,8 +2787,11 @@ run_study("main", grid_main(), run_main_unit)
 # ### Study 2 - scalability and measured communication cost
 #
 # This is where the decentralization claim has to earn its keep: quality should hold while
-# **per-node** gossip cost stays roughly flat, because a node only ever talks to neighbours.
-# The centralized reference is included at the sizes where it is still affordable.
+# **per-node** gossip cost stays bounded, because a node only ever talks to neighbours.
+# Note that the per-node payload is bounded *by construction* (fanout 3, push plus pull, at
+# most 12 neighbour ids per message gives a 270-byte ceiling for every method, Static
+# included); what distinguishes the methods is quality and wall-clock, and the message count
+# per round, which grows linearly with n. The centralized reference is run at every size.
 
 # %%
 def grid_scalability() -> List[dict]:
@@ -2537,7 +2799,7 @@ def grid_scalability() -> List[dict]:
     algos = ["FogField-LLL", "FogField-BR", "GossipGreedy", "Consensus-ADMM", "Static"]
     tb_name = "BEJ" if "BEJ" in TESTBEDS else "MEL"
     for n in SCALE_NODES:
-        for algo in algos + (["D-POA-style"] if n <= 100 else []):
+        for algo in algos + ["D-POA-style"]:
             for seed in SCALE_SEEDS:
                 u = dict(study="scalability", testbed=tb_name, scenario="static",
                          algo=algo, n_nodes=n, seed=seed,
@@ -2562,9 +2824,12 @@ run_study("scalability", grid_scalability(), run_scale_unit)
 #
 # Both sides answer the same question - *given where the nodes are now, where should they
 # end up, counting the cost of getting there* - so both are scored with `phi_reduced`
-# evaluated against the **common starting configuration**. The heuristic's cumulative flight
-# path is not charged against it, because the MILP pays for exactly one move; charging the
-# path would make the gap look better than it is.
+# evaluated against the **common starting configuration**, from which every heuristic also
+# *starts* (v2; in v1.0 the heuristics drew their own initial deployment and only the scoring
+# used the common start). The heuristic's cumulative flight path is not charged against it,
+# because the MILP pays for exactly one move; charging the path would make the gap look
+# better than it is. The MILP instance uses a longer slot (dt = 150 s) and a coarser lattice
+# (220 m) than the main grid so that one decision epoch reaches across the region.
 
 # %%
 def grid_milp() -> List[dict]:
@@ -2587,23 +2852,27 @@ def run_milp_unit(u: dict) -> dict:
     milp = solve_milp(env, start, w, time_limit=90 if QUICK else 300)
     rec = {"study": "milp", "n_nodes": u["n_nodes"], "seed": u["seed"],
            "milp_status": milp["status"], "milp_bound": milp["objective_bound"],
-           "milp_achieved": milp["objective_achieved"], "milp_cells": milp["n_cells"],
+           "milp_achieved": milp["objective_achieved"],
+           "milp_achieved_reduced": milp["objective_achieved_reduced"],
+           "milp_cells": milp["n_cells"], "objective": "subgame-v2",
            "milp_binaries": milp["n_binaries"],
            "milp_connectivity": milp["connectivity_of_milp_solution"]}
 
     active = np.ones(env.n_nodes, dtype=bool)
     bound = milp["objective_bound"]
     for algo in ["FogField-LLL", "FogField-BR", "GossipGreedy", "Guerrero-style",
-                 "Consensus-ADMM", "MARL-IQL", "D-POA-style"]:
-        sub = simulate(env, algo, "static", 5000 + u["seed"], rounds=40,
-                       ckpt_every=20, resume=False)
+                 "Consensus-ADMM", "MARL-IQL", "D-POA-style", "Static", "RandomWalk"]:
+        sub = simulate(env, algo, "static", u["seed"], rounds=40,
+                       ckpt_every=20, resume=False, init_pos=start)
         # score the final configuration against the COMMON start, so the heuristic is
         # charged for one deployment move exactly as the MILP is
         final = np.asarray(sub["final_pos"])
+        rec["phi_sub_" + algo] = phi_subgame(env, final, start, active, w)
         rec["phi_red_" + algo] = phi_reduced(env, final, start, active, w)
         rec["conn_" + algo] = env.connectivity(final, active) / env.n_nodes
+        rec["cov_" + algo] = env.coverage(final, active, w) / max(float(np.sum(w)), 1e-9)
         if bound is not None and np.isfinite(bound) and abs(bound) > 1e-12:
-            rec["gap_" + algo] = float((bound - rec["phi_red_" + algo]) / abs(bound))
+            rec["gap_" + algo] = float((bound - rec["phi_sub_" + algo]) / abs(bound))
     return rec
 
 
@@ -2635,34 +2904,129 @@ run_study("milp", grid_milp(), run_milp_unit, budget_min=TIME_BUDGET_MIN)
 # %%
 def grid_equilibrium() -> List[dict]:
     units = []
-    for algo in ["FogField-LLL", "FogField-BR", "GossipGreedy", "Consensus-ADMM"]:
-        for seed in GRID_SEEDS[:3]:
-            u = dict(study="equilibrium", testbed="MEL", algo=algo, n_nodes=40, seed=seed)
-            u["_key"] = unit_key(**u)
-            units.append(u)
+    for tb_name in TESTBEDS:
+        for algo in ["FogField-LLL", "FogField-BR", "GossipGreedy", "Consensus-ADMM"]:
+            for seed in GRID_SEEDS:
+                u = dict(study="equilibrium", testbed=tb_name, algo=algo, n_nodes=40, seed=seed)
+                u["_key"] = unit_key(**u)
+                units.append(u)
     return units
 
 
+EQ_ROUNDS = 80
+
+
 def run_equilibrium_unit(u: dict) -> dict:
-    env = make_env(TESTBEDS["MEL"], u["n_nodes"], R_comm=500.0)
-    sub = simulate(env, u["algo"], "static", 7000 + u["seed"], rounds=80,
+    # MEL: tighter R_comm so that gossip cannot reach a full mesh (see the note above);
+    # BEJ: the main-grid radii, since 40 nodes over 11.6 km are far from a full mesh anyway.
+    kw = {"R_comm": 500.0} if u["testbed"] == "MEL" else {}
+    env = make_env(TESTBEDS[u["testbed"]], u["n_nodes"], **kw)
+    sub = simulate(env, u["algo"], "static", u["seed"], rounds=EQ_ROUNDS,
                    ckpt_every=20, resume=False, return_state=True)
     pos = np.asarray(sub["final_pos"])
     prev = np.asarray(sub["final_prev"])
     active = np.asarray(sub["final_alive"], dtype=bool)
-    w = env.testbed.weights(0)
+    # evaluate at the demand slot the final configuration was reached under
+    tb = env.testbed
+    w = tb.weights(0 if tb.n_slots == 1 else EQ_ROUNDS - 1)
     gz = sub["_gossip"]
 
-    ng = nash_gap(env, pos, prev, active, w)
-    lg = locality_gap(env, pos, prev, active, w, gz)
-    rec = {"study": "equilibrium", "algo": u["algo"], "seed": u["seed"],
-           "n_nodes": u["n_nodes"]}
+    # rest-point semantics: the slot game at the reached configuration, moves charged from it
+    ng = nash_gap(env, pos, pos, active, w)
+    lg = locality_gap(env, pos, pos, active, w, gz, n_sample=16)
+    rec = {"study": "equilibrium", "testbed": u["testbed"], "algo": u["algo"],
+           "seed": u["seed"], "n_nodes": u["n_nodes"], "phi_final": sub["phi_final"],
+           "R_comm": env.R_comm}
     rec.update({"nash_" + k: v for k, v in ng.items()})
     rec.update({"loc_" + k: v for k, v in lg.items()})
     return rec
 
 
 run_study("equilibrium", grid_equilibrium(), run_equilibrium_unit)
+
+# %% [markdown]
+# ### Study 5 - log-linear annealing schedule (v2)
+#
+# T2's selection property is a statement about the limit `beta -> infinity` of a fixed-`beta`
+# chain; the implemented FogField-LLL anneals `beta` from 8 toward a cap of 400 over roughly
+# 110 rounds, so most of a 150-round run is spent exploring. This sweep asks how much of
+# LLL's deficit against FogField-BR is the schedule: the same (testbed, n, seed) units as the
+# main grid, `static` scenario, under five schedules. The `base` variant repeats the
+# main-grid configuration and must reproduce it exactly (common random numbers), which doubles
+# as a cross-process reproducibility check.
+
+# %%
+LLL_SCHEDULES = {
+    "base":     dict(beta0=8.0, beta_growth=0.45, beta_max=400.0),
+    "fast":     dict(beta0=8.0, beta_growth=4.0, beta_max=400.0),
+    "cap4000":  dict(beta0=8.0, beta_growth=4.0, beta_max=4000.0),
+    "fixed400": dict(beta0=400.0, beta_growth=0.0, beta_max=400.0),
+    "fixed50":  dict(beta0=50.0, beta_growth=0.0, beta_max=50.0),
+}
+
+
+def grid_lll_schedule() -> List[dict]:
+    units = []
+    for tb_name in TESTBEDS:
+        for variant in LLL_SCHEDULES:
+            for n in GRID_NODES:
+                for seed in GRID_SEEDS:
+                    u = dict(study="lll_schedule", testbed=tb_name, scenario="static",
+                             algo="FogField-LLL", variant=variant, n_nodes=n, seed=seed,
+                             rounds=GRID_ROUNDS)
+                    u["_key"] = unit_key(**u)
+                    units.append(u)
+    return units
+
+
+def run_lll_unit(u: dict) -> dict:
+    env = make_env(TESTBEDS[u["testbed"]], u["n_nodes"])
+    rec = simulate(env, u["algo"], u["scenario"], u["seed"], u["rounds"],
+                   ckpt_every=CKPT_EVERY, ctrl_kwargs=LLL_SCHEDULES[u["variant"]])
+    rec["study"] = "lll_schedule"
+    rec["variant"] = u["variant"]
+    return rec
+
+
+run_study("lll_schedule", grid_lll_schedule(), run_lll_unit)
+
+# %% [markdown]
+# ### Study 6 - the bounded local view, as a logged measurement (v2)
+#
+# Section 8 bounds each node's view to its `K = 12` nearest known neighbours. v1.0 quoted the
+# cost of *not* bounding it (mean view 445 nodes, 0.3 s per node-decision at n = 800 on MEL)
+# from an unlogged development run. This study makes it a ledger unit: FogField-BR at
+# n = 800 on each testbed, bounded and unbounded, four rounds each, recording the mean view
+# size and the measured seconds per node-decision.
+
+# %%
+def grid_viewbound() -> List[dict]:
+    units = []
+    for tb_name in TESTBEDS:
+        for cap in (12, None):
+            u = dict(study="viewbound", testbed=tb_name, scenario="static", algo="FogField-BR",
+                     n_nodes=800, seed=0, rounds=4, view_cap=cap)
+            u["_key"] = unit_key(**u)
+            units.append(u)
+    return units
+
+
+def run_viewbound_unit(u: dict) -> dict:
+    env = make_env(TESTBEDS[u["testbed"]], u["n_nodes"])
+    rec = simulate(env, u["algo"], u["scenario"], u["seed"], u["rounds"], ckpt_every=2,
+                   resume=False, view_cap=u["view_cap"])
+    rec["study"] = "viewbound"
+    rec["sec_per_round"] = rec["wallclock_s"] / max(u["rounds"], 1)
+    for k in ("trace_phi", "final_pos", "final_prev", "final_alive"):
+        rec.pop(k, None)
+    return rec
+
+
+run_study("viewbound", grid_viewbound(), run_viewbound_unit)
+
+if os.environ.get("FOGFIELD_STOP_AFTER_EXPERIMENTS"):
+    print("[grid] FOGFIELD_STOP_AFTER_EXPERIMENTS set - stopping before the analysis section")
+    raise SystemExit(0)
 # %% [markdown]
 # ## 17 - Results
 #
@@ -2784,9 +3148,8 @@ _ = plot_scenarios("MEL", "coverage_frac")
 #
 # Read this against the plan's threshold: if the gap for FogField is **above about 25%**, the
 # theory-first framing is the wrong one and the paper should be pitched as a practical
-# decentralized scheme with measured overhead. The worst-case guarantee for this structure is
-# only `NE >= 1/2 optimum` (Vetta 2002, PoA <= 2), i.e. a 50% gap, and the point of this
-# figure is to show that the *realised* gap is far smaller than the bound admits.
+# decentralized scheme with measured overhead. (v2: the MILP is an exact bound on the
+# coverage-energy sub-game objective over the full lattice; no PoA line is drawn, see T3.)
 
 # %%
 def analyze_optimality_gap():
@@ -2814,9 +3177,8 @@ def analyze_optimality_gap():
     ax.boxplot(data, showmeans=True)
     ax.set_xticks(range(1, len(data) + 1))
     ax.set_xticklabels(list(summary.index))
-    ax.axhline(50, ls="--", color="crimson", lw=1.0)
-    ax.annotate("worst-case bound admitted by PoA <= 2 (Vetta 2002)", (0.55, 51),
-                fontsize=7.5, color="crimson")
+    # v2: no PoA line - the PoA <= 2 bound holds only for the coverage-energy sub-game (T3),
+    # and the configurations scored here are not certified equilibria of it
     ax.set_ylabel("gap to exact bound (%)")
     ax.set_title("Empirical optimality gap - small instances, MEL")
     plt.xticks(rotation=20, ha="right")
@@ -2881,25 +3243,42 @@ SCALE_TBL = plot_scalability()
 
 # %%
 def plot_recovery():
+    """Recovery per testbed with explicit censoring (v2).
+
+    `recovery_rounds` counts the remaining horizon for a unit that never regains 95% of its
+    pre-event potential, so it is only interpretable next to `recovery_censored`, the share
+    of such units. Static is the null row: anything Static "recovers" is the environment.
+    """
     if MAIN.empty:
         return
-    sub = MAIN[MAIN.scenario.isin(["catastrophic", "seed_loss", "random_failures"])]
-    sub = sub.dropna(subset=["recovery_rounds"])
+    scen = ["catastrophic", "controller_loss", "seed_loss", "random_failures"]
+    sub = MAIN[MAIN.scenario.isin(scen)].dropna(subset=["recovery_rounds"])
     if sub.empty:
         print("[skip] no recovery data")
         return
-    piv = sub.pivot_table(index="algo", columns="scenario", values="recovery_rounds",
-                          aggfunc="mean")
-    fig, ax = plt.subplots(figsize=(7.8, 3.8))
-    piv.plot(kind="bar", ax=ax, width=0.8)
-    ax.set_ylabel("rounds to regain 95% of pre-event $\\Phi$")
-    ax.set_xlabel(""); ax.set_title("Recovery after disruption")
-    plt.xticks(rotation=25, ha="right")
-    ax.legend(fontsize=7)
+    piv = sub.pivot_table(index=["testbed", "algo"], columns="scenario",
+                          values="recovery_rounds", aggfunc="mean")
+    cens = sub.pivot_table(index=["testbed", "algo"], columns="scenario",
+                           values="recovery_censored", aggfunc="mean")
+    fig, axes = plt.subplots(1, 2, figsize=(11, 3.8), sharey=True)
+    for ax, tb in zip(axes, sorted(sub.testbed.unique())):
+        p = piv.loc[tb] if tb in piv.index.get_level_values(0) else None
+        if p is None:
+            continue
+        p.plot(kind="bar", ax=ax, width=0.8)
+        ax.set_title("{} - mean rounds (censored at horizon)".format(tb))
+        ax.set_xlabel(""); ax.legend(fontsize=7)
+        ax.tick_params(axis="x", rotation=25)
+    axes[0].set_ylabel("rounds to regain 95% of pre-event $\\Phi$")
     fig.savefig(DIRS["figs"] / "fig6_recovery.png", bbox_inches="tight")
     plt.show()
     save_table(piv.round(2), "table4_recovery",
-               "Mean rounds to recover 95% of pre-event potential.")
+               "Mean rounds to recover 95% of pre-event potential, per testbed "
+               "(censored units count the remaining horizon; see table4b).")
+    save_table(cens.round(3), "table4b_recovery_censored",
+               "Share of units that never regained 95% of pre-event potential.")
+    print(piv.round(1).to_string())
+    print("\ncensored share:\n" + cens.round(2).to_string())
     return piv
 
 
@@ -2931,10 +3310,12 @@ def report_equilibrium():
         return None
     cols = {"nash_epsilon": "mean", "nash_epsilon_rel": "mean",
             "nash_mean_improvement": "mean", "nash_is_eps_nash_1pct": "mean",
-            "loc_rank_agreement": "mean", "loc_info_fraction": "mean",
+            "loc_rank_agreement": "mean", "loc_top3_agreement": "mean",
+            "loc_info_fraction": "mean",
             "loc_regret_mean": "mean", "loc_regret_max": "max"}
     have = {k: v for k, v in cols.items() if k in EQ.columns}
-    tbl = EQ.groupby("algo").agg(have).round(5)
+    keys = ["testbed", "algo"] if "testbed" in EQ.columns else ["algo"]
+    tbl = EQ.groupby(keys).agg(have).round(5)
     save_table(tbl, "table5_equilibrium",
                "Equilibrium quality and the cost of neighbour-only information.")
     print(tbl.to_string())
@@ -2972,6 +3353,112 @@ def report_overhead():
 
 
 OVH = report_overhead()
+
+# %% [markdown]
+# ### v2 tables: paired Byzantine effect, controller loss, LLL schedule, view bound
+#
+# With common random numbers the byzantine and static units of one algorithm share the
+# deployment, the demand process and the algorithm's own randomness, so the difference
+# `phi(byzantine) - phi(static)` is a paired quantity per (testbed, n, seed). Static and
+# RandomWalk ignore gossip and must come out at exactly zero; they are the null rows.
+
+# %%
+from scipy import stats as sstats
+
+
+def _paired(a: np.ndarray, b: np.ndarray) -> dict:
+    d = np.asarray(a, dtype=float) - np.asarray(b, dtype=float)
+    out = {"n": int(d.size), "mean_diff": float(d.mean()) if d.size else float("nan")}
+    if d.size >= 2 and np.std(d) > 0:
+        ci = sstats.t.interval(0.95, d.size - 1, loc=d.mean(), scale=sstats.sem(d))
+        out["ci_lo"], out["ci_hi"] = float(ci[0]), float(ci[1])
+        try:
+            out["wilcoxon_p"] = float(sstats.wilcoxon(d).pvalue)
+        except ValueError:
+            out["wilcoxon_p"] = float("nan")
+    else:
+        out["ci_lo"] = out["ci_hi"] = out["mean_diff"]
+        out["wilcoxon_p"] = 1.0 if d.size else float("nan")
+    return out
+
+
+def report_paired_scenario(scenario_a: str, scenario_b: str, stem: str, caption: str):
+    if MAIN.empty:
+        return None
+    rows = []
+    idx = ["testbed", "algo", "n_nodes", "seed"]
+    a = MAIN[MAIN.scenario == scenario_a].set_index(idx)["phi_final"]
+    b = MAIN[MAIN.scenario == scenario_b].set_index(idx)["phi_final"]
+    common = a.index.intersection(b.index)
+    if len(common) == 0:
+        return None
+    a, b = a.loc[common], b.loc[common]
+    for (tb, algo), grp in a.groupby(level=["testbed", "algo"]):
+        st = _paired(grp.to_numpy(), b.loc[grp.index].to_numpy())
+        st["rel_pct"] = 100.0 * st["mean_diff"] / max(abs(b.loc[grp.index].mean()), 1e-12)
+        rows.append({"testbed": tb, "algo": algo, "phi_" + scenario_b: float(b.loc[grp.index].mean()),
+                     "phi_" + scenario_a: float(grp.mean()), **st})
+    tbl = pd.DataFrame(rows).set_index(["testbed", "algo"]).sort_index()
+    save_table(tbl.round(4), stem, caption, float_fmt="%.4f")
+    print(tbl.round(4).to_string())
+    return tbl
+
+
+BYZ = report_paired_scenario("byzantine", "static", "table7_byzantine_paired",
+                             "Paired effect of 15% Byzantine gossip on the final potential.")
+
+
+def report_controller_loss():
+    """Service level after the controller is lost (D-POA-style) against the others."""
+    if MAIN.empty or "controller_loss" not in set(MAIN.scenario):
+        return None
+    sub = MAIN[MAIN.scenario == "controller_loss"]
+    tbl = (sub.groupby(["testbed", "algo"])
+           [["phi_pre_mid", "phi_post_mid", "phi_post_tail", "cov_post_tail",
+             "recovery_rounds", "recovery_censored", "ctrl_bytes_per_round"]]
+           .mean())
+    tbl["retained_frac"] = tbl["phi_post_tail"] / tbl["phi_pre_mid"]
+    save_table(tbl.round(4), "table8_controller_loss",
+               "Controller-loss scenario: potential before and after the midpoint, and the "
+               "modelled controller uplink while it is alive.", float_fmt="%.4f")
+    print(tbl.round(3).to_string())
+    return tbl
+
+
+CTRL_LOSS = report_controller_loss()
+
+LLL_SWEEP = load_study("lll_schedule")
+
+
+def report_lll_schedule():
+    if LLL_SWEEP.empty:
+        return None
+    tbl = (LLL_SWEEP.groupby(["testbed", "n_nodes", "variant"])["phi_final"]
+           .agg(["mean", "std", "count"]))
+    # reference rows from the main grid (same units, common random numbers)
+    ref = (MAIN[(MAIN.scenario == "static") & MAIN.algo.isin(["FogField-BR", "FogField-LLL"])]
+           .groupby(["testbed", "n_nodes", "algo"])["phi_final"].agg(["mean", "std", "count"]))
+    ref.index = ref.index.set_names(["testbed", "n_nodes", "variant"])
+    ref = ref.rename(index={"FogField-BR": "ref:FogField-BR", "FogField-LLL": "ref:FogField-LLL"})
+    tbl = pd.concat([tbl, ref]).sort_index()
+    save_table(tbl.round(4), "table9_lll_schedule",
+               "FogField-LLL under five annealing schedules (static scenario), with the "
+               "main-grid BR and LLL rows for the same units.", float_fmt="%.4f")
+    print(tbl.round(3).to_string())
+    return tbl
+
+
+LLL_TBL = report_lll_schedule()
+
+VIEWB = load_study("viewbound")
+if not VIEWB.empty:
+    cols = [c for c in ["testbed", "view_cap", "view_size_mean", "decide_s_per_node",
+                        "sec_per_round", "wallclock_s", "phi_final"] if c in VIEWB.columns]
+    vb = VIEWB[cols].sort_values(["testbed", "view_cap"], na_position="last").set_index(["testbed", "view_cap"])
+    save_table(vb.round(4), "table10_viewbound",
+               "Bounded (K = 12) versus unbounded local view at n = 800: mean view size and "
+               "measured seconds per node-decision.", float_fmt="%.4f")
+    print(vb.round(4).to_string())
 
 # %% [markdown]
 # ### Deployment snapshot
@@ -3055,7 +3542,11 @@ MANIFEST = {
         "checkpoint_resume_selftest": RESUME_TEST,
     },
     "counts": {n: len(Ledger(DIRS["results"], n))
-               for n in ("main", "scalability", "milp", "equilibrium")},
+               for n in ("main", "scalability", "milp", "equilibrium", "lll_schedule", "viewbound")},
+    "seeding": ("v2: common random numbers; deployment/scenario/adversary streams seeded by "
+                "(testbed, n, seed), algorithm stream by (testbed, n, seed, algorithm); "
+                "SHA-256-derived seeds, independent of PYTHONHASHSEED"),
+    "lll_schedules": LLL_SCHEDULES,
     "scenarios": {k: v.description for k, v in SCENARIOS.items()},
     "algorithms": {k: {"decentralized": v.decentralized, "uses_gossip": v.uses_gossip}
                    for k, v in ALGORITHMS.items()},
@@ -3128,10 +3619,11 @@ reset_state("none")
 #    unquantified until they do. Report these numbers as *protocol payload*, never as
 #    "measured communication overhead" without that qualifier.
 # 2. **No claim of a provable global-optimum approximation.** What is established is the
-#    exact-potential property (verified numerically), convergence to a pure equilibrium
-#    (measured as the Nash gap), and an empirical gap to an exact bound. The only worst-case
-#    guarantee is `NE >= 1/2 optimum` for the uncapacitated, valid-utility variant
-#    (Vetta 2002). The capacitated variant is outside that structure and the bound is **not**
+#    exact-potential property (verified numerically), convergence of idealised best response
+#    with inertia to a constrained equilibrium (T1, which needs the loiter energy model), and an
+#    empirical gap to an exact bound. The only worst-case guarantee (T3) is for the
+#    coverage-energy sub-game: gamma(NE) >= (gamma(OPT) - E(NE)) / 2. The full objective is NOT a
+#    valid utility system (its giant-component term is not submodular), so no PoA bound is
 #    claimed for it.
 # 3. **The MILP is a relaxation.** Connectivity is not constrained in it, so it is an upper
 #    bound and the reported gap is conservative rather than exact. Instances are small

@@ -119,9 +119,8 @@ _ = plot_scenarios("MEL", "coverage_frac")
 #
 # Read this against the plan's threshold: if the gap for FogField is **above about 25%**, the
 # theory-first framing is the wrong one and the paper should be pitched as a practical
-# decentralized scheme with measured overhead. The worst-case guarantee for this structure is
-# only `NE >= 1/2 optimum` (Vetta 2002, PoA <= 2), i.e. a 50% gap, and the point of this
-# figure is to show that the *realised* gap is far smaller than the bound admits.
+# decentralized scheme with measured overhead. (v2: the MILP is an exact bound on the
+# coverage-energy sub-game objective over the full lattice; no PoA line is drawn, see T3.)
 
 # %%
 def analyze_optimality_gap():
@@ -149,9 +148,8 @@ def analyze_optimality_gap():
     ax.boxplot(data, showmeans=True)
     ax.set_xticks(range(1, len(data) + 1))
     ax.set_xticklabels(list(summary.index))
-    ax.axhline(50, ls="--", color="crimson", lw=1.0)
-    ax.annotate("worst-case bound admitted by PoA <= 2 (Vetta 2002)", (0.55, 51),
-                fontsize=7.5, color="crimson")
+    # v2: no PoA line - the PoA <= 2 bound holds only for the coverage-energy sub-game (T3),
+    # and the configurations scored here are not certified equilibria of it
     ax.set_ylabel("gap to exact bound (%)")
     ax.set_title("Empirical optimality gap - small instances, MEL")
     plt.xticks(rotation=20, ha="right")
@@ -216,25 +214,42 @@ SCALE_TBL = plot_scalability()
 
 # %%
 def plot_recovery():
+    """Recovery per testbed with explicit censoring (v2).
+
+    `recovery_rounds` counts the remaining horizon for a unit that never regains 95% of its
+    pre-event potential, so it is only interpretable next to `recovery_censored`, the share
+    of such units. Static is the null row: anything Static "recovers" is the environment.
+    """
     if MAIN.empty:
         return
-    sub = MAIN[MAIN.scenario.isin(["catastrophic", "seed_loss", "random_failures"])]
-    sub = sub.dropna(subset=["recovery_rounds"])
+    scen = ["catastrophic", "controller_loss", "seed_loss", "random_failures"]
+    sub = MAIN[MAIN.scenario.isin(scen)].dropna(subset=["recovery_rounds"])
     if sub.empty:
         print("[skip] no recovery data")
         return
-    piv = sub.pivot_table(index="algo", columns="scenario", values="recovery_rounds",
-                          aggfunc="mean")
-    fig, ax = plt.subplots(figsize=(7.8, 3.8))
-    piv.plot(kind="bar", ax=ax, width=0.8)
-    ax.set_ylabel("rounds to regain 95% of pre-event $\\Phi$")
-    ax.set_xlabel(""); ax.set_title("Recovery after disruption")
-    plt.xticks(rotation=25, ha="right")
-    ax.legend(fontsize=7)
+    piv = sub.pivot_table(index=["testbed", "algo"], columns="scenario",
+                          values="recovery_rounds", aggfunc="mean")
+    cens = sub.pivot_table(index=["testbed", "algo"], columns="scenario",
+                           values="recovery_censored", aggfunc="mean")
+    fig, axes = plt.subplots(1, 2, figsize=(11, 3.8), sharey=True)
+    for ax, tb in zip(axes, sorted(sub.testbed.unique())):
+        p = piv.loc[tb] if tb in piv.index.get_level_values(0) else None
+        if p is None:
+            continue
+        p.plot(kind="bar", ax=ax, width=0.8)
+        ax.set_title("{} - mean rounds (censored at horizon)".format(tb))
+        ax.set_xlabel(""); ax.legend(fontsize=7)
+        ax.tick_params(axis="x", rotation=25)
+    axes[0].set_ylabel("rounds to regain 95% of pre-event $\\Phi$")
     fig.savefig(DIRS["figs"] / "fig6_recovery.png", bbox_inches="tight")
     plt.show()
     save_table(piv.round(2), "table4_recovery",
-               "Mean rounds to recover 95% of pre-event potential.")
+               "Mean rounds to recover 95% of pre-event potential, per testbed "
+               "(censored units count the remaining horizon; see table4b).")
+    save_table(cens.round(3), "table4b_recovery_censored",
+               "Share of units that never regained 95% of pre-event potential.")
+    print(piv.round(1).to_string())
+    print("\ncensored share:\n" + cens.round(2).to_string())
     return piv
 
 
@@ -266,10 +281,12 @@ def report_equilibrium():
         return None
     cols = {"nash_epsilon": "mean", "nash_epsilon_rel": "mean",
             "nash_mean_improvement": "mean", "nash_is_eps_nash_1pct": "mean",
-            "loc_rank_agreement": "mean", "loc_info_fraction": "mean",
+            "loc_rank_agreement": "mean", "loc_top3_agreement": "mean",
+            "loc_info_fraction": "mean",
             "loc_regret_mean": "mean", "loc_regret_max": "max"}
     have = {k: v for k, v in cols.items() if k in EQ.columns}
-    tbl = EQ.groupby("algo").agg(have).round(5)
+    keys = ["testbed", "algo"] if "testbed" in EQ.columns else ["algo"]
+    tbl = EQ.groupby(keys).agg(have).round(5)
     save_table(tbl, "table5_equilibrium",
                "Equilibrium quality and the cost of neighbour-only information.")
     print(tbl.to_string())
@@ -307,6 +324,112 @@ def report_overhead():
 
 
 OVH = report_overhead()
+
+# %% [markdown]
+# ### v2 tables: paired Byzantine effect, controller loss, LLL schedule, view bound
+#
+# With common random numbers the byzantine and static units of one algorithm share the
+# deployment, the demand process and the algorithm's own randomness, so the difference
+# `phi(byzantine) - phi(static)` is a paired quantity per (testbed, n, seed). Static and
+# RandomWalk ignore gossip and must come out at exactly zero; they are the null rows.
+
+# %%
+from scipy import stats as sstats
+
+
+def _paired(a: np.ndarray, b: np.ndarray) -> dict:
+    d = np.asarray(a, dtype=float) - np.asarray(b, dtype=float)
+    out = {"n": int(d.size), "mean_diff": float(d.mean()) if d.size else float("nan")}
+    if d.size >= 2 and np.std(d) > 0:
+        ci = sstats.t.interval(0.95, d.size - 1, loc=d.mean(), scale=sstats.sem(d))
+        out["ci_lo"], out["ci_hi"] = float(ci[0]), float(ci[1])
+        try:
+            out["wilcoxon_p"] = float(sstats.wilcoxon(d).pvalue)
+        except ValueError:
+            out["wilcoxon_p"] = float("nan")
+    else:
+        out["ci_lo"] = out["ci_hi"] = out["mean_diff"]
+        out["wilcoxon_p"] = 1.0 if d.size else float("nan")
+    return out
+
+
+def report_paired_scenario(scenario_a: str, scenario_b: str, stem: str, caption: str):
+    if MAIN.empty:
+        return None
+    rows = []
+    idx = ["testbed", "algo", "n_nodes", "seed"]
+    a = MAIN[MAIN.scenario == scenario_a].set_index(idx)["phi_final"]
+    b = MAIN[MAIN.scenario == scenario_b].set_index(idx)["phi_final"]
+    common = a.index.intersection(b.index)
+    if len(common) == 0:
+        return None
+    a, b = a.loc[common], b.loc[common]
+    for (tb, algo), grp in a.groupby(level=["testbed", "algo"]):
+        st = _paired(grp.to_numpy(), b.loc[grp.index].to_numpy())
+        st["rel_pct"] = 100.0 * st["mean_diff"] / max(abs(b.loc[grp.index].mean()), 1e-12)
+        rows.append({"testbed": tb, "algo": algo, "phi_" + scenario_b: float(b.loc[grp.index].mean()),
+                     "phi_" + scenario_a: float(grp.mean()), **st})
+    tbl = pd.DataFrame(rows).set_index(["testbed", "algo"]).sort_index()
+    save_table(tbl.round(4), stem, caption, float_fmt="%.4f")
+    print(tbl.round(4).to_string())
+    return tbl
+
+
+BYZ = report_paired_scenario("byzantine", "static", "table7_byzantine_paired",
+                             "Paired effect of 15% Byzantine gossip on the final potential.")
+
+
+def report_controller_loss():
+    """Service level after the controller is lost (D-POA-style) against the others."""
+    if MAIN.empty or "controller_loss" not in set(MAIN.scenario):
+        return None
+    sub = MAIN[MAIN.scenario == "controller_loss"]
+    tbl = (sub.groupby(["testbed", "algo"])
+           [["phi_pre_mid", "phi_post_mid", "phi_post_tail", "cov_post_tail",
+             "recovery_rounds", "recovery_censored", "ctrl_bytes_per_round"]]
+           .mean())
+    tbl["retained_frac"] = tbl["phi_post_tail"] / tbl["phi_pre_mid"]
+    save_table(tbl.round(4), "table8_controller_loss",
+               "Controller-loss scenario: potential before and after the midpoint, and the "
+               "modelled controller uplink while it is alive.", float_fmt="%.4f")
+    print(tbl.round(3).to_string())
+    return tbl
+
+
+CTRL_LOSS = report_controller_loss()
+
+LLL_SWEEP = load_study("lll_schedule")
+
+
+def report_lll_schedule():
+    if LLL_SWEEP.empty:
+        return None
+    tbl = (LLL_SWEEP.groupby(["testbed", "n_nodes", "variant"])["phi_final"]
+           .agg(["mean", "std", "count"]))
+    # reference rows from the main grid (same units, common random numbers)
+    ref = (MAIN[(MAIN.scenario == "static") & MAIN.algo.isin(["FogField-BR", "FogField-LLL"])]
+           .groupby(["testbed", "n_nodes", "algo"])["phi_final"].agg(["mean", "std", "count"]))
+    ref.index = ref.index.set_names(["testbed", "n_nodes", "variant"])
+    ref = ref.rename(index={"FogField-BR": "ref:FogField-BR", "FogField-LLL": "ref:FogField-LLL"})
+    tbl = pd.concat([tbl, ref]).sort_index()
+    save_table(tbl.round(4), "table9_lll_schedule",
+               "FogField-LLL under five annealing schedules (static scenario), with the "
+               "main-grid BR and LLL rows for the same units.", float_fmt="%.4f")
+    print(tbl.round(3).to_string())
+    return tbl
+
+
+LLL_TBL = report_lll_schedule()
+
+VIEWB = load_study("viewbound")
+if not VIEWB.empty:
+    cols = [c for c in ["testbed", "view_cap", "view_size_mean", "decide_s_per_node",
+                        "sec_per_round", "wallclock_s", "phi_final"] if c in VIEWB.columns]
+    vb = VIEWB[cols].sort_values(["testbed", "view_cap"], na_position="last").set_index(["testbed", "view_cap"])
+    save_table(vb.round(4), "table10_viewbound",
+               "Bounded (K = 12) versus unbounded local view at n = 800: mean view size and "
+               "measured seconds per node-decision.", float_fmt="%.4f")
+    print(vb.round(4).to_string())
 
 # %% [markdown]
 # ### Deployment snapshot

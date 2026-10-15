@@ -1,20 +1,31 @@
 \begin{table}
-\caption{Mean rounds to recover 95% of pre-event potential.}
+\caption{Mean rounds to recover 95% of pre-event potential, per testbed (censored units count the remaining horizon; see table4b).}
 \label{tab:table4_recovery}
-\begin{tabular}{lrrr}
+\begin{tabular}{llrrrr}
 \toprule
-scenario & catastrophic & random\_failures & seed\_loss \\
-algo &  &  &  \\
+ & scenario & catastrophic & controller\_loss & random\_failures & seed\_loss \\
+testbed & algo &  &  &  &  \\
 \midrule
-Consensus-ADMM & 35.900 & 8.030 & 10.750 \\
-D-POA-style & 52.050 & 4.750 & 10.500 \\
-FogField-BR & 66.450 & 5.940 & 11.250 \\
-FogField-LLL & 61.900 & 5.320 & 11.650 \\
-GossipGreedy & 49.300 & 8.190 & 10.500 \\
-Guerrero-style & 54.550 & 10.700 & 10.550 \\
-MARL-IQL & 42.250 & 10.360 & 11.600 \\
-RandomWalk & 60.700 & 7.260 & 12.100 \\
-Static & 60.200 & 9.000 & 10.500 \\
+\multirow[t]{9}{*}{BEJ} & Consensus-ADMM & 29.000 & 21.000 & 13.720 & 21.200 \\
+ & D-POA-style & 54.600 & 21.000 & 12.880 & 22.100 \\
+ & FogField-BR & 58.000 & 21.200 & 13.920 & 21.700 \\
+ & FogField-LLL & 54.000 & 21.100 & 10.070 & 21.800 \\
+ & GossipGreedy & 45.600 & 21.300 & 12.930 & 21.300 \\
+ & Guerrero-style & 36.500 & 21.000 & 12.140 & 22.900 \\
+ & MARL-IQL & 46.300 & 22.800 & 16.200 & 22.000 \\
+ & RandomWalk & 45.000 & 22.800 & 14.430 & 25.700 \\
+ & Static & 39.900 & 21.000 & 12.180 & 22.900 \\
+\cline{1-6}
+\multirow[t]{9}{*}{MEL} & Consensus-ADMM & 67.600 & 0.000 & 13.460 & 0.000 \\
+ & D-POA-style & 75.000 & 0.000 & 0.480 & 0.000 \\
+ & FogField-BR & 75.000 & 0.000 & 0.360 & 0.000 \\
+ & FogField-LLL & 75.000 & 0.000 & 0.450 & 0.000 \\
+ & GossipGreedy & 60.200 & 0.100 & 2.140 & 0.200 \\
+ & Guerrero-style & 75.000 & 0.000 & 8.780 & 0.000 \\
+ & MARL-IQL & 53.800 & 2.000 & 2.980 & 0.700 \\
+ & RandomWalk & 64.300 & 0.800 & 2.780 & 0.300 \\
+ & Static & 75.000 & 0.000 & 8.780 & 0.000 \\
+\cline{1-6}
 \bottomrule
 \end{tabular}
 \end{table}

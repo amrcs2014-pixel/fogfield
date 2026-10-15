@@ -87,6 +87,7 @@ import time
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -224,6 +225,33 @@ def unit_key(**params) -> str:
     return hashlib.sha1(blob).hexdigest()[:16]
 
 
+def _stream_seed(*parts) -> int:
+    """64-bit seed derived from the parameters themselves (SHA-256), never from hash()."""
+    blob = json.dumps([str(p) for p in parts]).encode("utf-8")
+    return int(hashlib.sha256(blob).hexdigest()[:16], 16)
+
+
+def seed_streams(testbed: str, n_nodes: int, seed: int, algo: str) -> Dict[str, np.random.Generator]:
+    """Common random numbers across algorithms and scenarios.
+
+    Four independent PCG64 streams. `deploy` (initial deployment), `scenario` (which nodes
+    fail and when, flash-crowd centre) and `adversary` (which nodes lie, what they report)
+    depend on (testbed, n, seed) only, so every algorithm and every scenario of a given
+    (testbed, n, seed) starts from the same deployment, suffers the same events and faces the
+    same attacker. `algo` additionally depends on the algorithm name, so the byzantine and
+    static runs of one algorithm also share its own decision randomness and differ only in the
+    falsified messages. v1.0 seeded one stream from Python's per-process hash() of the unit
+    key, which made units irreproducible across interpreters and unpaired across algorithms.
+    """
+    base = (str(testbed), int(n_nodes), int(seed))
+    return {
+        "deploy": np.random.default_rng(_stream_seed("deploy", *base)),
+        "scenario": np.random.default_rng(_stream_seed("scenario", *base)),
+        "adversary": np.random.default_rng(_stream_seed("adversary", *base)),
+        "algo": np.random.default_rng(_stream_seed("algo", *base, str(algo))),
+    }
+
+
 class Ledger:
     """One-file-per-unit result store with resume support."""
 
@@ -256,7 +284,7 @@ class Ledger:
 class RunCheckpointer:
     """Mid-run checkpointing, including RNG state, for long single runs."""
 
-    VERSION = 2
+    VERSION = 3
 
     def __init__(self, key: str, ckpt_every: int = 50, enabled: bool = True):
         self.path = DIRS["ckpt"] / (key + ".pkl")

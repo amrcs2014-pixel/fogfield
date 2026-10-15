@@ -11,8 +11,8 @@ plt.show = lambda *a, **k: None
 
 SRC = Path(__file__).parent / "fogfield_src_fullrun.py"
 src = SRC.read_text(encoding="utf-8")
-src, n = re.subn(r"^TIME_BUDGET_MIN = 50 if QUICK else 50$",
-                 "TIME_BUDGET_MIN = 0.03 if QUICK else 0.03", src, flags=re.MULTILINE)
+src, n = re.subn(r'^TIME_BUDGET_MIN = float\(os\.environ\.get\("FOGFIELD_BUDGET_MIN", "50"\)\)$',
+                 "TIME_BUDGET_MIN = 0.03", src, flags=re.MULTILINE)
 assert n == 1
 g = sys.modules["__main__"].__dict__
 g["__file__"] = str(SRC)

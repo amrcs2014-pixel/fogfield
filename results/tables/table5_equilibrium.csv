@@ -1,5 +1,9 @@
-algo,nash_epsilon,nash_epsilon_rel,nash_mean_improvement,nash_is_eps_nash_1pct,loc_rank_agreement,loc_info_fraction,loc_regret_mean,loc_regret_max
-Consensus-ADMM,0.09128,0.12495,0.06923,0.33333,0.13889,0.54202,0.02567,0.11071
-FogField-BR,0.01226,0.01044,0.00289,0.66667,0.55556,0.41595,0.00131,0.02737
-FogField-LLL,0.00407,0.00342,0.00143,1.0,0.22222,0.28846,0.00082,0.00874
-GossipGreedy,0.00923,0.00779,0.00303,0.66667,0.22222,0.80769,0.00131,0.01223
+testbed,algo,nash_epsilon,nash_epsilon_rel,nash_mean_improvement,nash_is_eps_nash_1pct,loc_rank_agreement,loc_top3_agreement,loc_info_fraction,loc_regret_mean,loc_regret_max
+BEJ,Consensus-ADMM,0.02056,0.45779,0.00869,0.0,0.8625,0.95,0.13109,0.00339,0.06767
+BEJ,FogField-BR,0.00975,0.03341,0.00085,0.2,0.5625,0.7625,0.06154,0.00059,0.00924
+BEJ,FogField-LLL,0.01642,0.06973,0.00208,0.0,0.7,0.8125,0.07115,0.00184,0.05516
+BEJ,GossipGreedy,0.04061,0.20132,0.0057,0.0,0.4,0.5,0.06603,0.00444,0.0525
+MEL,Consensus-ADMM,0.10987,0.11614,0.02807,0.0,0.3,0.3625,0.64455,0.01757,0.14012
+MEL,FogField-BR,0.00027,0.00022,0.00013,1.0,0.1125,0.1125,0.33269,0.00014,0.00027
+MEL,FogField-LLL,0.00198,0.00162,0.00033,1.0,0.15,0.1875,0.29904,0.00036,0.00875
+MEL,GossipGreedy,0.00358,0.00295,0.00116,0.8,0.25,0.35,0.79776,0.00059,0.01481

@@ -31,7 +31,11 @@ MANIFEST = {
         "checkpoint_resume_selftest": RESUME_TEST,
     },
     "counts": {n: len(Ledger(DIRS["results"], n))
-               for n in ("main", "scalability", "milp", "equilibrium")},
+               for n in ("main", "scalability", "milp", "equilibrium", "lll_schedule", "viewbound")},
+    "seeding": ("v2: common random numbers; deployment/scenario/adversary streams seeded by "
+                "(testbed, n, seed), algorithm stream by (testbed, n, seed, algorithm); "
+                "SHA-256-derived seeds, independent of PYTHONHASHSEED"),
+    "lll_schedules": LLL_SCHEDULES,
     "scenarios": {k: v.description for k, v in SCENARIOS.items()},
     "algorithms": {k: {"decentralized": v.decentralized, "uses_gossip": v.uses_gossip}
                    for k, v in ALGORITHMS.items()},
@@ -104,10 +108,11 @@ reset_state("none")
 #    unquantified until they do. Report these numbers as *protocol payload*, never as
 #    "measured communication overhead" without that qualifier.
 # 2. **No claim of a provable global-optimum approximation.** What is established is the
-#    exact-potential property (verified numerically), convergence to a pure equilibrium
-#    (measured as the Nash gap), and an empirical gap to an exact bound. The only worst-case
-#    guarantee is `NE >= 1/2 optimum` for the uncapacitated, valid-utility variant
-#    (Vetta 2002). The capacitated variant is outside that structure and the bound is **not**
+#    exact-potential property (verified numerically), convergence of idealised best response
+#    with inertia to a constrained equilibrium (T1, which needs the loiter energy model), and an
+#    empirical gap to an exact bound. The only worst-case guarantee (T3) is for the
+#    coverage-energy sub-game: gamma(NE) >= (gamma(OPT) - E(NE)) / 2. The full objective is NOT a
+#    valid utility system (its giant-component term is not submodular), so no PoA bound is
 #    claimed for it.
 # 3. **The MILP is a relaxation.** Connectivity is not constrained in it, so it is an upper
 #    bound and the reported gap is conservative rather than exact. Instances are small

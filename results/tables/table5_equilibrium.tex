@@ -1,15 +1,21 @@
 \begin{table}
 \caption{Equilibrium quality and the cost of neighbour-only information.}
 \label{tab:table5_equilibrium}
-\begin{tabular}{lrrrrrrrr}
+\begin{tabular}{llrrrrrrrrr}
 \toprule
- & nash\_epsilon & nash\_epsilon\_rel & nash\_mean\_improvement & nash\_is\_eps\_nash\_1pct & loc\_rank\_agreement & loc\_info\_fraction & loc\_regret\_mean & loc\_regret\_max \\
-algo &  &  &  &  &  &  &  &  \\
+ &  & nash\_epsilon & nash\_epsilon\_rel & nash\_mean\_improvement & nash\_is\_eps\_nash\_1pct & loc\_rank\_agreement & loc\_top3\_agreement & loc\_info\_fraction & loc\_regret\_mean & loc\_regret\_max \\
+testbed & algo &  &  &  &  &  &  &  &  &  \\
 \midrule
-Consensus-ADMM & 0.091 & 0.125 & 0.069 & 0.333 & 0.139 & 0.542 & 0.026 & 0.111 \\
-FogField-BR & 0.012 & 0.010 & 0.003 & 0.667 & 0.556 & 0.416 & 0.001 & 0.027 \\
-FogField-LLL & 0.004 & 0.003 & 0.001 & 1.000 & 0.222 & 0.288 & 0.001 & 0.009 \\
-GossipGreedy & 0.009 & 0.008 & 0.003 & 0.667 & 0.222 & 0.808 & 0.001 & 0.012 \\
+\multirow[t]{4}{*}{BEJ} & Consensus-ADMM & 0.021 & 0.458 & 0.009 & 0.000 & 0.863 & 0.950 & 0.131 & 0.003 & 0.068 \\
+ & FogField-BR & 0.010 & 0.033 & 0.001 & 0.200 & 0.562 & 0.762 & 0.062 & 0.001 & 0.009 \\
+ & FogField-LLL & 0.016 & 0.070 & 0.002 & 0.000 & 0.700 & 0.812 & 0.071 & 0.002 & 0.055 \\
+ & GossipGreedy & 0.041 & 0.201 & 0.006 & 0.000 & 0.400 & 0.500 & 0.066 & 0.004 & 0.052 \\
+\cline{1-11}
+\multirow[t]{4}{*}{MEL} & Consensus-ADMM & 0.110 & 0.116 & 0.028 & 0.000 & 0.300 & 0.362 & 0.645 & 0.018 & 0.140 \\
+ & FogField-BR & 0.000 & 0.000 & 0.000 & 1.000 & 0.113 & 0.113 & 0.333 & 0.000 & 0.000 \\
+ & FogField-LLL & 0.002 & 0.002 & 0.000 & 1.000 & 0.150 & 0.188 & 0.299 & 0.000 & 0.009 \\
+ & GossipGreedy & 0.004 & 0.003 & 0.001 & 0.800 & 0.250 & 0.350 & 0.798 & 0.001 & 0.015 \\
+\cline{1-11}
 \bottomrule
 \end{tabular}
 \end{table}

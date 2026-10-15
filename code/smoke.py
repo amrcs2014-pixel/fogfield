@@ -28,11 +28,12 @@ subs = [
     (r"^    SCALE_NODES = \[25, 50, 100\]$", "    SCALE_NODES = [8, 16]"),
     (r"^    MILP_NODES = \[5, 6\]$", "    MILP_NODES = [4]"),
     (r"^    MILP_SEEDS = \[0, 1\]$", "    MILP_SEEDS = [0]"),
-    (r"^TIME_BUDGET_MIN = 45 if QUICK else 180$", "TIME_BUDGET_MIN = 12 if QUICK else 180"),
-    (r'sub = simulate\(env, algo, "static", 5000 \+ u\["seed"\], rounds=40,',
-     'sub = simulate(env, algo, "static", 5000 + u["seed"], rounds=6,'),
-    (r'sub = simulate\(env, u\["algo"\], "static", 7000 \+ u\["seed"\], rounds=80,',
-     'sub = simulate(env, u["algo"], "static", 7000 + u["seed"], rounds=6,'),
+    (r'^TIME_BUDGET_MIN = float\(os\.environ\.get\("FOGFIELD_BUDGET_MIN", "50"\)\)$', "TIME_BUDGET_MIN = 12"),
+    (r'sub = simulate\(env, algo, "static", u\["seed"\], rounds=40,',
+     'sub = simulate(env, algo, "static", u["seed"], rounds=6,'),
+    (r"^EQ_ROUNDS = 80$", "EQ_ROUNDS = 6"),
+    (r"^                     n_nodes=800, seed=0, rounds=4, view_cap=cap\)$",
+     "                     n_nodes=40, seed=0, rounds=2, view_cap=cap)"),
 ]
 for pat, rep in subs:
     src, n = re.subn(pat, rep, src, flags=re.MULTILINE)
@@ -43,7 +44,7 @@ for pat, rep in subs:
 src = src.replace(
     'for scen in SCENARIOS:',
     'for scen in ["static", "catastrophic", "flash_crowd", "seed_loss", "byzantine", '
-    '"expansion", "random_failures", "mobility", "traffic_shift"]:')
+    '"expansion", "random_failures", "mobility", "traffic_shift", "controller_loss", "late_surge", "ctrl_fail", "late_fail", "ctrl_drift", "late_drift"]:')
 
 plt.show = lambda *a, **k: None
 

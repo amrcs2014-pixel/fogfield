@@ -152,7 +152,7 @@ def load_eua_melbcbd(max_devices: int = 600, seed: int = 0) -> Testbed:
 
 
 # %%
-def load_geolife(max_users: int = 50, grid_m: float = 400.0, slot_min: int = 60,
+def load_geolife(max_users: Optional[int] = None, grid_m: float = 400.0, slot_min: int = 60,
                  top_cells: int = 400, roi_km: float = 12.0) -> Testbed:
     """GeoLife v1.3 -> real time-varying demand field over central Beijing.
 
@@ -160,7 +160,8 @@ def load_geolife(max_users: int = 50, grid_m: float = 400.0, slot_min: int = 60,
     `slot_min` minutes, pooled across all days. The busiest `top_cells` cells become the
     device field; each cell's per-slot point count is its demand weight.
     """
-    tag = "geolife_u{}_g{:.0f}_s{}_c{}".format(max_users, grid_m, slot_min, top_cells)
+    tag = "geolife_u{}_g{:.0f}_s{}_c{}".format("all" if max_users is None else max_users,
+                                                 grid_m, slot_min, top_cells)
     cache = DIRS["cache"] / (tag + ".npz")
     if cache.exists():
         z = np.load(cache, allow_pickle=True)
@@ -182,9 +183,12 @@ def load_geolife(max_users: int = 50, grid_m: float = 400.0, slot_min: int = 60,
         by_user: Dict[str, List[str]] = {}
         for name in plts:
             parts = name.split("/")
-            uid = parts[1] if len(parts) > 2 else "000"
+            # paths look like "Geolife Trajectories 1.3/Data/<user>/Trajectory/<file>.plt";
+            # v1.0 took parts[1], which is the literal "Data" for every file, so the user cap
+            # never applied (all 182 users were read) and the manifest reported 1 user
+            uid = parts[parts.index("Data") + 1] if "Data" in parts[:-1] else "000"
             by_user.setdefault(uid, []).append(name)
-        users = sorted(by_user)[:max_users]
+        users = sorted(by_user) if max_users is None else sorted(by_user)[:max_users]
         files = [f for u in users for f in by_user[u]]
 
         for name in tqdm(files, desc="GeoLife .plt", unit="file"):
@@ -273,7 +277,7 @@ print(TESTBEDS["MEL"].describe())
 
 try:
     TESTBEDS["BEJ"] = load_geolife(
-        max_users=25 if QUICK else 60,
+        max_users=None,                 # all 182 users (see the parser note above)
         grid_m=400.0,
         slot_min=60 if QUICK else 30,
         top_cells=250 if QUICK else 500,

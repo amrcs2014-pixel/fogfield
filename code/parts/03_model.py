@@ -28,6 +28,7 @@ class UAVPower:
     P_cpu_idle: float = 4.0  # idle compute power (W)
     P_cpu_busy: float = 12.0 # additional compute power at full load (W)
     battery_Wh: float = 275.0
+    loiter: bool = True      # station-keeping by loitering at V_me rather than hovering (v2)
 
     def propulsion(self, V):
         V = np.asarray(V, dtype=np.float64)
@@ -41,13 +42,32 @@ class UAVPower:
     def P_hover(self) -> float:
         return float(self.P0 + self.Pi)
 
-    def flight_energy(self, dist_m, dt_s: float):
-        """Energy (J) to travel `dist_m` within a step of `dt_s`, hovering for the remainder.
+    @cached_property
+    def V_me(self) -> float:
+        """Maximum-endurance speed: the speed that minimises propulsion power."""
+        V = np.linspace(0.0, self.V_max, 20001)
+        return float(V[int(np.argmin(self.propulsion(V)))])
 
-        The UAV flies at the slowest speed that covers the distance in time, capped at
-        `V_max`; slower flight is cheaper per second but the step budget is fixed.
+    @property
+    def P_me(self) -> float:
+        return float(self.propulsion(self.V_me))
+
+    def flight_energy(self, dist_m, dt_s: float):
+        """Energy (J) to travel `dist_m` within a step of `dt_s`.
+
+        v2 (loiter=True): the UAV flies the whole step at speed max(d/dt, V_me), capped at
+        V_max; a node that needs to cover less than V_me*dt (staying put included) loiters at
+        the maximum-endurance speed V_me instead of hovering, because hovering costs more
+        (P(0) = 168.5 W against P(V_me) = 126.0 W with the paper's parameters). The slot energy
+        is therefore non-decreasing in the distance and minimal for staying, which is what
+        makes a stationary configuration a possible rest point of the dynamics (T1).
+
+        loiter=False reproduces v1.0: fly at the slowest sufficient speed, hover for the rest.
         """
         dist = np.asarray(dist_m, dtype=np.float64)
+        if self.loiter:
+            V = np.clip(np.maximum(dist / max(dt_s, 1e-9), self.V_me), 0.0, self.V_max)
+            return self.propulsion(V) * dt_s
         v_need = dist / max(dt_s, 1e-9)
         V = np.clip(v_need, 0.0, self.V_max)
         t_fly = np.where(V > 1e-9, dist / np.maximum(V, 1e-9), 0.0)
@@ -75,6 +95,10 @@ print("P(0)          = {:.2f} W   (P0 + Pi = {:.2f} W)".format(_hover, UAV.P_hov
 print("min power at V= {:.1f} m/s -> {:.2f} W".format(_v_opt, float(_P.min())))
 print("battery       = {:.0f} Wh = {:.0f} kJ -> {:.1f} min of hover".format(
     UAV.battery_Wh, UAV.battery_Wh * 3600 / 1000, UAV.battery_Wh * 3600 / UAV.P_hover / 60))
+print("loiter (v2)   : V_me = {:.2f} m/s, P(V_me) = {:.2f} W; a station-keeping node loiters "
+      "at V_me, so staying is the cheapest move".format(UAV.V_me, UAV.P_me))
+_e = UAV.flight_energy(np.array([0.0, 120.0, 306.0, 400.0, 600.0]), 30.0)
+assert np.all(np.diff(_e) >= -1e-9), "slot energy must be non-decreasing in distance"
 
 fig, ax = plt.subplots(figsize=(5.2, 3.0))
 ax.plot(_V, _P)

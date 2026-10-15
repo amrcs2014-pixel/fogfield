@@ -1,106 +1,87 @@
 # FogField
 
 Code and results for **"FogField: Fully Decentralized Repositioning of UAV-Mounted Fog Nodes via
-Potential Games and Gossip"** (Amr H. Abdelhaliem, Irbid National University; manuscript prepared for
-*IEEE Transactions on Network and Service Management*).
+Potential Games and Gossip"**. The author is Amr H. Abdelhaliem, Irbid National University. The manuscript is prepared for
+*IEEE Transactions on Network and Service Management*.
 
-FogField repositions UAV-mounted fog nodes with no central controller. Repositioning is formulated as an
-exact potential game over the communication graph: players are nodes, strategies are the lattice cells
-reachable in one slot, and each node's marginal-contribution (wonderful-life) utility has the global
-coverage, connectivity, energy objective as its potential. Nodes play the game by best response with inertia
-(FogField-BR) or by log-linear learning with an annealed inverse temperature (FogField-LLL), using only a
-bounded neighbour view maintained by push-pull gossip. The gossip cost is *measured* by running the real
-serialisation codec and counting payload bytes, and the node energy follows the Zeng, Xu and Zhang
-rotary-wing propulsion model.
+FogField repositions UAV-mounted fog nodes with no central controller.
+
+- **Game.** Repositioning is a sequence of exact potential games, one per slot. Players are nodes and strategies are the lattice cells reachable in one slot. Each node's marginal-contribution (wonderful-life) utility has the global coverage, connectivity and energy objective as its potential.
+- **Dynamics.** Nodes play best response with inertia (FogField-BR) or annealed log-linear learning (FogField-LLL). They use only a bounded neighbour view maintained by push-pull gossip.
+- **Energy and payload.** Node energy follows the Zeng–Xu–Zhang rotary-wing model, and station-keeping is modelled as loitering at the maximum-endurance speed. Gossip payload is *measured* by running the real serialisation codec.
 
 ![Deployment](results/figures/fig_deployment_bej.png)
 
+## Version 1.1 (15 Oct 2026): revision after internal review
+
+v1.1 re-runs the whole study. The tag `v1.0` keeps the original code and ledger for comparison. The changes:
+
+- **Common random numbers.** Each work unit draws its deployment, scenario events and adversary from (testbed, n, seed), and its algorithm stream adds the algorithm. Every comparison is paired, and every unit regenerates bit-identically in a fresh process. v1.0 seeded from Python's per-process `hash()`.
+- **Loitering energy model.** Hovering (168.5 W) costs more than slow flight (126.0 W), so a station-keeping node now loiters at the maximum-endurance speed. Under v1.0's model a node could save energy by moving back and forth.
+- **Energy charged from the current position.** v1.0 charged a candidate move from the node's previous position.
+- **Exact MILP bound.** The MILP now covers every lattice cell and scores the coverage–energy sub-game objective. Heuristics start from the MILP's start.
+- **Repaired centralized reference.** D-POA-style re-evaluates its swarm memory every slot and re-initialises when demand changes. v1.0 chased optima remembered from earlier demand slots.
+- **New studies.** Three controller-loss experiments, each with a controller-alive twin; logged bounded-versus-unbounded view at 800 nodes; an annealing-schedule sweep; and a five-seed equilibrium study on both testbeds.
+
 ## What the evaluation covers
 
-- **Two open testbeds**: MEL (EUA dataset, Melbourne CBD: 816 real user locations, runs seeded from 125 real
-  base-station sites) and BEJ (GeoLife, Beijing: 500 demand cells over 48 real time-of-day slots, pooled
-  across days into a diurnal demand surface).
-- **Nine dynamic scenarios**: static, mobility, random failures, traffic shift, expansion, catastrophic
-  (50 % simultaneous loss), flash crowd, seed loss, and byzantine (15 % of nodes gossip falsified state).
-- **Baselines sharing the same runner and measurement harness**: GossipGreedy, Guerrero-style, Consensus-ADMM
-  and MARL-IQL (decentralised); a D-POA-style centralised swarm; Static and RandomWalk; and an exact CBC MILP
-  bound on small instances.
-- **Diagnostics**: a numerical check of the exact-potential identity (65 profiles, zero violation), an
-  epsilon-Nash test on the global potential, a locality gap between the neighbour-only utility estimator and
-  the true marginal contribution, and a checkpoint-resume self-test (bit-identical traces).
-- **Scale**: 1,738 checkpointed work units: 1,620 main grid (2 testbeds × 9 scenarios × 9 algorithms ×
-  n ∈ {20, 50} × 5 seeds), 81 scalability (50 to 800 nodes), 25 MILP, 12 equilibrium.
+- **Testbeds.**
+  - MEL: the EUA dataset, Melbourne CBD. It has 816 real user locations, and runs start from 125 real base-station sites.
+  - BEJ: GeoLife, Beijing, all 182 users. It has 500 demand cells over 48 real time-of-day slots, pooled across days.
+- **Scenarios.** There are fifteen: static, mobility, random failures, traffic shift, expansion, catastrophic (50 % loss), flash crowd, single-node loss, byzantine (15 % falsified gossip), controller loss, late surge (the control twin of controller loss), and two harder controller-loss pairs: node failures after the loss (`ctrl_fail`/`late_fail`) and a sweeping demand hotspot (`ctrl_drift`/`late_drift`).
+- **Baselines.** All share the same runner and measurement harness:
+  - Decentralised: GossipGreedy, Guerrero-style, Consensus-ADMM and MARL-IQL.
+  - Centralised: a D-POA-style swarm.
+  - References: Static, RandomWalk, and an exact CBC MILP.
+- **Scale.** 2,959 checkpointed work units with zero failures: 2,700 main grid, 90 scalability (50–800 nodes), 25 MILP, 40 equilibrium, 100 annealing schedule and 4 view bound.
 
-### Headline results
+### Headline results (v1.1)
 
-| Method | MILP gap, mean % (25 inst.) | BEJ static, Φ | BEJ catastrophic, Φ | Payload B/node/round, n = 800 |
-|---|---|---|---|---|
-| **FogField-BR** | 3.76 | **0.505** | **0.285** | 267.0 |
-| FogField-LLL | 8.05 | 0.450 | 0.281 | 268.4 |
-| D-POA-style (centralised) | **3.67** | 0.344 | 0.248 | – |
-| GossipGreedy | 59.95 | 0.359 | 0.275 | 266.7 |
-| Guerrero-style | 27.02 | 0.276 | 0.213 | – |
-| Consensus-ADMM | 69.45 | 0.168 | 0.138 | 265.6 |
-| MARL-IQL | 112.64 | 0.150 | 0.066 | – |
-| Static | – | 0.280 | 0.185 | 270.0 |
+- **Optimality gap.** FogField-BR's mean gap to the exact MILP optimum is 1.24 %, against 2.59 % for the centralised reference (paired p = 0.010). It is exactly optimal on 11 of 25 instances.
+- **BEJ.** FogField-BR has the highest objective in all 10 distinct scenarios. Its lead is significant in 8, by +9 % to +27 %. It is not significant under byzantine or random failures.
+- **MEL.** MEL is saturated, and the centralised reference is ahead by 0.3 %.
+- **Scalability.** FogField-BR is best at n ≤ 100 and GossipGreedy from n = 200 on. Per-node payload is bounded by the codec at 270 B per slot for every method.
+- **Limits reported in the paper:**
+  - Falsified gossip costs FogField-BR 7.9 %.
+  - Losing the centralised controller costs the reference 13.6 % (BEJ) and 4.9 % (MEL) only when node failures continue afterwards; under a surge or a sweeping hotspot it costs nothing measurable.
+  - Guerrero-style never clears its migration threshold, so its results equal Static.
+  - Payload is application-layer only.
 
-- FogField-BR matches the centralised reference on the optimality gap (paired t-test p = 0.94) using
-  neighbour-only information, and both FogField variants sit an order of magnitude inside the 50 % worst
-  case that the PoA ≤ 2 bound admits.
-- On BEJ, FogField improves the objective over the best non-FogField baseline in every scenario (+3.6 % to
-  +40.7 %). On MEL coverage saturates above 99 % for every competent method, so that testbed does not
-  discriminate; the paper reports this as a negative result.
-- Per-node payload grows only from 127 to 267 bytes per round as the network grows from 50 to 800 nodes.
-- FogField-LLL reaches a 1 % epsilon-Nash equilibrium in every run while each node knows under 30 % of the
-  network.
-- **Limits, reported in the paper**: FogField degrades more under falsified gossip than simpler heuristics
-  (−6.5 % and −9.9 % against −1.2 %); it is slowest to regain 95 % of its pre-event objective after
-  catastrophic loss, a metric the paper shows is confounded by pre-event quality (r² = 0.69); the measured
-  cost is application-layer payload only (no MAC, retransmission or loss); the MILP omits the connectivity
-  constraint and is a relaxation.
-
-All numbers come from the ledger in `results/ledger.zip`; `results/tables/` and `results/figures/` are
-generated from it.
+All numbers come from the ledger in `results/ledger.zip`. `code/paper_numbers.py` regenerates every table, figure and quoted number of the paper from it (`results/paper_numbers.json`).
 
 ## Repository layout
 
 ```
-FogField_Q1.ipynb          the whole study as one Colab-style notebook (compiled from code/parts/)
+FogField_Q1.ipynb          the whole study as one notebook (compiled from code/parts/)
 code/
-  fogfield_src_fullrun.py  the notebook as a script, configured for the paper-scale grid (QUICK = False)
-  fogfield_src.py          the same source with the quick Colab configuration (QUICK = True)
-  parts/01..10_*.py        the ten sections the source is assembled from
-  driver.py                run the script headless: --mode grind (resumable, 50-min budget per call)
-                           or --mode analysis (tables and figures from the ledger, no re-computation)
-  restore_ledger.py        unpack results/ledger.zip and data/cache/ into code/fogfield_out_full/
-  make_paper_figs2.py      paper-style vector figures
-  build_notebook.py        compile the # %% source into the .ipynb
+  fogfield_src_fullrun.py  the canonical script, paper-scale grid (QUICK = False)
+  fogfield_src.py          the same source with the quick configuration (QUICK = True)
+  parts/01..10_*.py        the ten sections the source is assembled from (sync_sources.py)
+  driver.py                --mode grind (resumable; FOGFIELD_NWORKERS / FOGFIELD_WORKER for
+                           parallel workers) or --mode analysis (notebook tables and figures)
+  run_grid.ps1             self-restarting Windows launcher used for the v1.1 run
+  grid_status.py           progress of the grid
+  test_crn.py              checks of the common random numbers
+  paper_numbers.py         the paper's tables, figures and numbers from the ledger
+  restore_ledger.py        unpack results/ledger.zip and data/cache/ into code/fogfield_out_v2/
   smoke.py                 execute every code path on a shrunken grid
-  tools/                   author's helpers: priority pass for the MILP/equilibrium studies, LaTeX
-                           packaging, Word conversion, this repository's assembly script
+  tools/                   packaging, Word conversion, repository assembly, and the one-off
+                           v1.0 -> v1.1 source patches (revise_v2_patch*.py)
 results/
-  run_manifest.json        datasets, UAV parameters, weights, grid, verification results
-  potential_check.json     exact-potential identity check (uncapacitated and capacitated)
-  resume_selftest.json     checkpoint-resume self-test
-  ledger.zip               1,738 work-unit records (one JSON each, with per-round traces)
-  tables/                  table1..6 as CSV and LaTeX
+  run_manifest.json        datasets, UAV parameters, weights, grid, seeding, verification
+  ledger.zip               2,959 work-unit records (one JSON each, with per-slot traces)
+  paper_numbers.json       every scalar the paper quotes
+  tables/                  notebook tables and the paper's tables (paper_*.csv)
   figures/                 paper figures (PDF + PNG) and notebook diagnostics
-data/cache/
-  eua_melbcbd_816.npz      EUA Melbourne CBD devices and sites, projected to metres
-  geolife_u60_g400_s30_c500.npz   GeoLife Beijing demand surface (400 m grid, 30-min slots, 500 cells)
+data/cache/                derived dataset caches (EUA Melbourne; GeoLife Beijing, all users)
 ```
 
 ## Data
 
-Both testbeds are built from public datasets that the script downloads itself when the cache is absent.
-The derived caches in `data/cache/` are small and let the analysis run without any download.
-
 | Testbed | Source | Licence / terms |
 |---|---|---|
-| MEL | EUA dataset, `swinedge/eua-dataset` on GitHub (Lai et al., ICSOC 2018): Optus base-station sites and user locations in Melbourne CBD | as published by the EUA authors |
-| BEJ | GeoLife GPS Trajectories v1.3 (Microsoft Research Asia; Zheng et al.): 18,670 trajectory files, binned to a 400 m grid and 48 time-of-day slots, pooled across days | Microsoft Research licence; only the aggregated demand surface is redistributed here |
-
-The Telecom Italia Milano grid is not used because it requires a Dataverse guestbook response.
+| MEL | EUA dataset, `swinedge/eua-dataset` (Lai et al., ICSOC 2018) | as published by the EUA authors |
+| BEJ | GeoLife GPS Trajectories v1.3 (Microsoft Research Asia; Zheng et al.): 18,670 trajectory files, binned to a 400 m grid and 48 time-of-day slots | Microsoft Research licence; only the aggregated demand surface is redistributed here |
 
 ## Reproduce
 
@@ -109,17 +90,14 @@ Tested with Python 3.11 on Windows 11, CPU only.
 ```bash
 pip install -r requirements.txt
 cd code
-python restore_ledger.py                 # ledger + caches -> code/fogfield_out_full/
-python driver.py --mode analysis         # regenerates every table and figure from the ledger
-python make_paper_figs2.py               # paper-style vector figures -> code/paper_figs/
+python restore_ledger.py        # ledger + caches -> code/fogfield_out_v2/
+python paper_numbers.py         # the paper's tables, figures and numbers -> code/paper_tables/
+python driver.py --mode analysis
 ```
 
-To re-run the experiments, delete `code/fogfield_out_full/results/` and call
-`python driver.py --mode grind` repeatedly; every work unit is checkpointed with its RNG state, so a
-resumed run is bit-identical to an uninterrupted one. The full grid took about four and a half hours of
-wall-clock time on the author's desktop CPU (23 Sep 2026, see the released run logs). The notebook does the same on a free Colab session with checkpoints on Google Drive.
+To re-run the experiments, delete `code/fogfield_out_v2/results/` and call `python driver.py --mode grind` until `python grid_status.py` reports completion. Because the seeds are derived from each unit's parameters, a re-run reproduces the released records exactly, apart from the wall-clock fields.
 
-The run logs from the author's runs are attached to the GitHub release as `fogfield_run_logs.zip`.
+The v1.1 grid took about three hours with four CPU workers. The run logs of both versions (`fogfield_run_logs_v1.1.zip`) are meant as a release asset rather than a committed file.
 
 ## License
 

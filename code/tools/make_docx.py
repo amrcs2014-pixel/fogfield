@@ -233,6 +233,8 @@ def flatten():
         e = m.group(1)
         lm = re.search(r'\\label\{([^}]+)\}', e)
         e = re.sub(r'\\label\{[^}]+\}', '', e).strip()
+        if lm is None or lm.group(1) not in labels:      # e.g. inside a theorem whose labels were stripped
+            return '\\[ %s \\]' % e
         return '\\[ %s \\qquad (%s) \\]' % (e, labels[lm.group(1)])
     body = re.sub(r'\\begin\{equation\}(.*?)\\end\{equation\}', eq_env, body, flags=re.S)
 

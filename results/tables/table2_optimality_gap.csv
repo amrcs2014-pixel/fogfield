@@ -1,8 +1,10 @@
 ,mean_gap_%,median_gap_%,max_gap_%
-D-POA-style,3.67,2.35,25.86
-FogField-BR,3.76,3.08,8.7
-FogField-LLL,8.05,5.7,22.07
-Guerrero-style,27.02,26.36,55.79
-GossipGreedy,59.95,59.55,68.85
-Consensus-ADMM,69.45,69.37,78.19
-MARL-IQL,112.64,111.96,116.47
+FogField-BR,1.24,0.28,8.06
+D-POA-style,2.59,1.95,9.76
+FogField-LLL,6.32,5.82,20.47
+Guerrero-style,30.37,31.14,57.38
+Static,30.37,31.14,57.38
+GossipGreedy,58.16,57.1,66.25
+Consensus-ADMM,66.72,67.12,78.38
+RandomWalk,89.36,91.37,114.69
+MARL-IQL,111.89,111.13,114.71
