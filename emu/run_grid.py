@@ -59,9 +59,53 @@ def runs():
     return out
 
 
+def runs_v2():
+    """Second set of runs (--v2)."""
+    out = []
+    # large n, re-sampled: skip the initial deployment (offset 5) and replicate. n = 200: three
+    # trace seeds; n = 400 and 800: one trace seed, three ns-3 runs. Both methods, both channels.
+    for n in (200, 400, 800):
+        reps = [(s, 1) for s in range(3)] if n == 200 else [(0, k) for k in (1, 2, 3)]
+        for ch in ("fading", "disk"):
+            for seed, run in reps:
+                for algo in ("D-POA-style", "FogField-BR"):
+                    mode = "controller" if algo == "D-POA-style" else "gossip"
+                    out.append(dict(trace="scalability_BEJ_static_{}_n{}_s{}.trace".format(algo, n, seed),
+                                    mode=mode, channel=ch, tb="BEJ", window=1.0, stride=STRIDE[n],
+                                    offset=5, run=run))
+        # the controller's traffic spread over 10 s of the slot instead of 1 s (fading)
+        for seed, run in reps:
+            out.append(dict(trace="scalability_BEJ_static_D-POA-style_n{}_s{}.trace".format(n, seed),
+                            mode="controller", channel="fading", tb="BEJ", window=10.0, stride=STRIDE[n],
+                            offset=5, run=run))
+    # n = 50 and 100 on the same footing as n >= 200: from slot 5 on, with the controller log
+    if "--v2b" in sys.argv:
+        out = []
+        for n in (50, 100):
+            for ch in ("fading", "disk"):
+                for seed in range(3):
+                    for algo in ("D-POA-style", "FogField-BR"):
+                        mode = "controller" if algo == "D-POA-style" else "gossip"
+                        out.append(dict(trace="scalability_BEJ_static_{}_n{}_s{}.trace".format(algo, n, seed),
+                                        mode=mode, channel=ch, tb="BEJ", window=1.0, stride=1,
+                                        offset=5, run=1))
+        return out
+    # the reference's cost on its own mesh-only trajectories (same runs as its Phi in the loss study)
+    for ch in ("fading", "disk"):
+        for n in (20, 50):
+            for seed in range(5):
+                out.append(dict(trace="meshonly_BEJ_static_D-POA-style_n{}_s{}.trace".format(n, seed),
+                                mode="controller", channel=ch, tb="BEJ", window=1.0, stride=1,
+                                offset=0, run=1))
+    return out
+
+
 def name(r):
     base = r["trace"].replace(".trace", "")
-    return "{}__{}_{}_w{:g}.json".format(base, r["mode"], r["channel"], r["window"])
+    tail = ""
+    if r.get("offset", 0) or r.get("run", 1) != 1:
+        tail = "_o{}_r{}".format(r.get("offset", 0), r.get("run", 1))
+    return "{}__{}_{}_w{:g}{}.json".format(base, r["mode"], r["channel"], r["window"], tail)
 
 
 def run_one(r):
@@ -78,7 +122,8 @@ def run_one(r):
     tmp = dst + ".tmp" + TMP_SUFFIX     # distinct per pass: two passes may meet on one run
     args = [BIN, "--trace=" + loc, "--mode=" + r["mode"], "--channel=" + r["channel"],
             "--txPowerDbm={}".format(TXP[r["tb"]]), "--window={}".format(r["window"]),
-            "--slotStride={}".format(r["stride"]), "--out=" + tmp]
+            "--slotStride={}".format(r["stride"]), "--slotOffset={}".format(r.get("offset", 0)),
+            "--run={}".format(r.get("run", 1)), "--out=" + tmp]
     env = dict(os.environ, LD_LIBRARY_PATH=LIB)
     t0 = time.time()
     p = subprocess.run(args, env=env, capture_output=True, text=True)
@@ -95,7 +140,15 @@ def main():
     workers = int(sys.argv[1]) if len(sys.argv) > 1 else 6
     os.makedirs(TR, exist_ok=True)
     os.makedirs(OUT, exist_ok=True)
-    todo = [r for r in runs() if not os.path.exists(os.path.join(OUT, name(r)))]
+    v2 = "--v2" in sys.argv or "--v2b" in sys.argv
+    todo = [r for r in (runs_v2() if v2 else runs())
+            if not os.path.exists(os.path.join(OUT, name(r)))]
+    if v2:
+        # the costliest first, so that the pool does not end on one long n = 800 run
+        todo.sort(key=lambda r: -(int(r["trace"].split("_n")[1].split("_")[0]) ** 2
+                                  // (STRIDE.get(int(r["trace"].split("_n")[1].split("_")[0]), 1)
+                                      if r["trace"].startswith("scal") else 1)
+                                  * (3 if r["channel"] == "fading" else 1)))
     if "--missing-only" in sys.argv:
         # second pass while a first pass is still running: take only the runs the log reports
         # as skipped for want of a trace, which the first pass will never revisit

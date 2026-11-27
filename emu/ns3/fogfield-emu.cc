@@ -121,6 +121,32 @@ uint64_t b_air = 0;
 // controller: per slot
 int g_ctrl = -1;
 std::vector<int> g_parent, g_depth;
+// per-slot controller log (collection mode): who hosted the controller, its own transmit time,
+// and how many reports and commands were due, reachable and delivered in that slot
+std::vector<int> g_slotCtrl, g_slotDue, g_slotReach, g_slotRepRx, g_slotCmdRx, g_slotRnd;
+std::vector<double> g_slotCtrlTx;
+std::vector<double> g_txAtSlotStart;
+// per-slot peak (all modes): the largest transmit time of any node within the slot
+std::vector<double> g_slotMaxTx;
+
+void
+CloseSlot()
+{
+    // attribute the transmit time accumulated since the slot started to that slot's controller
+    if (g_mode == "controller" && g_curSlot >= 0 && g_ctrl >= 0)
+    {
+        g_slotCtrlTx[g_curSlot] = n_txTime[g_ctrl] - g_txAtSlotStart[g_ctrl];
+    }
+    if (g_curSlot >= 0 && g_txAtSlotStart.size() == n_txTime.size())
+    {
+        double mx = 0.0;
+        for (size_t i = 0; i < n_txTime.size(); ++i)
+        {
+            mx = std::max(mx, n_txTime[i] - g_txAtSlotStart[i]);
+        }
+        g_slotMaxTx[g_curSlot] = mx;
+    }
+}
 
 int
 NodeFromContext(const std::string& ctx)
@@ -388,6 +414,7 @@ OnRecv(Ptr<Socket> s)
             if (me == info.dst)
             {
                 ++c_repRx;
+                ++g_slotRepRx[info.slot];
                 g_repLat.push_back(now - info.tSend);
             }
             break;
@@ -395,6 +422,7 @@ OnRecv(Ptr<Socket> s)
             if (me == info.dst)
             {
                 ++c_cmdRx;
+                ++g_slotCmdRx[info.slot];
                 g_cmdLat.push_back(now - info.tSend);
             }
             break;
@@ -542,6 +570,8 @@ BuildControllerTree()
 void
 StartSlot(int s)
 {
+    CloseSlot();
+    g_txAtSlotStart = n_txTime;
     g_curSlot = s;
     g_beaconSeen.clear(); // receptions of the previous slot ended long before (window << slot)
     const Slot& sl = g_slots[s];
@@ -591,6 +621,7 @@ StartSlot(int s)
     else // controller
     {
         BuildControllerTree();
+        g_slotCtrl[s] = g_ctrl;
         for (int v = 0; v < g_n; ++v)
         {
             if (!g_alive[v] || v == g_ctrl)
@@ -599,11 +630,13 @@ StartSlot(int s)
             }
             ++c_repDue;
             ++c_cmdDue;
+            ++g_slotDue[s];
             if (g_depth[v] < 0)
             {
                 c_unreach += 1;
                 continue;
             }
+            ++g_slotReach[s];
             g_hops.push_back(g_depth[v]);
             Simulator::Schedule(Seconds(g_u->GetValue(0, g_window)), &SendReport, v);
             Simulator::Schedule(Seconds(g_window + g_u->GetValue(0, g_window)), &SendCmd, v);
@@ -655,6 +688,7 @@ JsonArr(const std::vector<double>& v, int prec = 6)
 
 // ---------------------------------------------------------------------------- calibration
 uint32_t g_calibRx = 0;
+uint32_t g_calibBytes = 45;
 
 void
 CalibRecv(Ptr<Socket> s)
@@ -669,14 +703,15 @@ CalibRecv(Ptr<Socket> s)
 void
 CalibSend(Ptr<Socket> s)
 {
-    s->Send(Create<Packet>(45));
+    s->Send(Create<Packet>(g_calibBytes));
 }
 
 int
 RunCalib(double txp, double m, double dmin, double dmax, double dstep, uint32_t npk, std::string out)
 {
     std::ofstream os(out);
-    os << "{\"mode\":\"calib\",\"txPowerDbm\":" << txp << ",\"m\":" << m << ",\"points\":[";
+    os << "{\"mode\":\"calib\",\"txPowerDbm\":" << txp << ",\"m\":" << m << ",\"bytes\":" << g_calibBytes
+       << ",\"points\":[";
     bool first = true;
     for (double d = dmin; d <= dmax + 1e-9; d += dstep)
     {
@@ -748,10 +783,13 @@ main(int argc, char* argv[])
     uint32_t cN = 500;
     int maxSlots = -1;
     int stride = 1;
+    int offset = 0;
     bool hookTraces = true;
     CommandLine cmd(__FILE__);
     cmd.AddValue("maxSlots", "replay only the first k slots (profiling)", maxSlots);
     cmd.AddValue("slotStride", "replay every k-th slot of the trace (large n)", stride);
+    cmd.AddValue("slotOffset", "first trace slot to replay (e.g. 5 to skip the initial deployment)", offset);
+    cmd.AddValue("calibBytes", "calib: broadcast payload size (bytes)", g_calibBytes);
     cmd.AddValue("hookTraces", "connect the PHY/MAC trace sources", hookTraces);
     cmd.AddValue("trace", "trace file from export_traffic.py", trace);
     cmd.AddValue("mode", "gossip | controller | calib", g_mode);
@@ -776,14 +814,28 @@ main(int argc, char* argv[])
 
     auto wall0 = std::chrono::steady_clock::now();
     ReadTrace(trace);
-    if (stride > 1)
+    if (stride > 1 || offset > 0)
     {
         std::vector<Slot> kept;
-        for (size_t s = 0; s < g_slots.size(); s += stride)
+        for (size_t s = offset; s < g_slots.size(); s += std::max(stride, 1))
         {
             kept.push_back(g_slots[s]);
         }
         g_slots.swap(kept);
+    }
+    {
+        size_t S = g_slots.size();
+        g_slotCtrl.assign(S, -1);
+        g_slotDue.assign(S, 0);
+        g_slotReach.assign(S, 0);
+        g_slotRepRx.assign(S, 0);
+        g_slotCmdRx.assign(S, 0);
+        g_slotCtrlTx.assign(S, 0.0);
+        g_slotMaxTx.assign(S, 0.0);
+        for (const auto& sl : g_slots)
+        {
+            g_slotRnd.push_back(sl.rnd);
+        }
     }
     if (maxSlots > 0 && (int)g_slots.size() > maxSlots)
     {
@@ -883,6 +935,7 @@ main(int argc, char* argv[])
     Simulator::Stop(Seconds(tEnd));
     auto wall1 = std::chrono::steady_clock::now();
     Simulator::Run();
+    CloseSlot();
     auto wall2 = std::chrono::steady_clock::now();
     std::cerr << "setup " << std::chrono::duration<double>(wall1 - wall0).count() << " s, run "
               << std::chrono::duration<double>(wall2 - wall1).count() << " s, events "
@@ -907,7 +960,7 @@ main(int argc, char* argv[])
     os << "{\"trace\":\"" << trace << "\",\"mode\":\"" << g_mode << "\",\"channel\":\"" << channel
        << "\",\"txPowerDbm\":" << txp << ",\"nakagamiM\":" << nakM << ",\"window\":" << g_window
        << ",\"run\":" << run << ",\"n\":" << g_n << ",\"slots\":" << g_slots.size()
-       << ",\"slot_stride\":" << stride
+       << ",\"slot_stride\":" << stride << ",\"slot_offset\":" << offset
        << ",\"R_comm\":" << g_rcomm << ",\"dt\":" << g_dt << ",\"node_slots\":" << nodeSlots;
     os << ",\"meta\":{";
     bool first = true;
@@ -944,7 +997,32 @@ main(int argc, char* argv[])
     {
         busy[i] = n_txTime[i] + n_rxTime[i] + n_ccaTime[i];
     }
-    os << JsonArr(busy) << "}\n";
+    os << JsonArr(busy);
+    {
+        std::vector<double> mxMs(g_slotMaxTx.size());
+        for (size_t k = 0; k < g_slotMaxTx.size(); ++k)
+        {
+            mxMs[k] = 1e3 * g_slotMaxTx[k];
+        }
+        os << ",\"slot_max_tx_ms\":" << JsonArr(mxMs);
+    }
+    if (g_mode == "controller")
+    {
+        auto ints = [](const std::vector<int>& v) {
+            std::vector<double> d(v.begin(), v.end());
+            return JsonArr(d, 10);
+        };
+        std::vector<double> ctrlTxMs(g_slotCtrlTx.size());
+        for (size_t k = 0; k < g_slotCtrlTx.size(); ++k)
+        {
+            ctrlTxMs[k] = 1e3 * g_slotCtrlTx[k];
+        }
+        os << ",\"ctrl_slots\":{\"rnd\":" << ints(g_slotRnd) << ",\"ctrl\":" << ints(g_slotCtrl)
+           << ",\"ctrl_tx_ms\":" << JsonArr(ctrlTxMs) << ",\"due\":" << ints(g_slotDue)
+           << ",\"reach\":" << ints(g_slotReach) << ",\"rep_rx\":" << ints(g_slotRepRx)
+           << ",\"cmd_rx\":" << ints(g_slotCmdRx) << "}";
+    }
+    os << "}\n";
     Simulator::Destroy();
     return 0;
 }

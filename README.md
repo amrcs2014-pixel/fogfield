@@ -8,6 +8,10 @@ FogField repositions UAV-mounted fog nodes with no central controller.
 - **Dynamics.** Nodes play best response with inertia (FogField-BR) or annealed log-linear learning (FogField-LLL). They use only a bounded neighbour view maintained by push-pull gossip.
 - **Energy and payload.** Node energy follows the Zeng–Xu–Zhang rotary-wing model, and station-keeping is modelled as loitering at the maximum-endurance speed. Gossip payload is *measured* by running the real serialisation codec.
 
+## Version 1.3 (27 Nov 2026): emulation tier, second set of runs
+
+v1.3 extends `emu/`. The ns-3 program logs per slot the controller's transmit time, the commands due, reachable and delivered, and every slot's peak transmit time over all nodes; it can skip the first slots of a trace (`--slotOffset`) and replicate a run with another ns-3 run number (`--run`). `run_grid.py --v2` and `--v2b` run a second set of ns-3 runs. `loss_study.py --v2` adds link outages (a Gilbert–Elliott chain per directed link that blocks beacons, pushes and pulls), a fallback rule and reachability-aware planning for the centralized reference over the mesh, and GossipGreedy with FogField-BR's activation schedule. The simulator and the ledger are unchanged.
+
 ## Version 1.2 (27 Nov 2026): packet-level emulation tier
 
 v1.2 adds `emu/`: code that replays the gossip protocol, and the centralized reference's state collection, packet by packet in ns-3.48 over IEEE 802.11g (a disk channel and a Nakagami-fading channel), and re-runs the simulator with the delivery probabilities measured there. The simulator and the ledger of v1.1 are unchanged. See `emu/README.md`.
@@ -59,7 +63,7 @@ results/
   resume_selftest.json     checkpoint-resume self-test
   ledger.zip               2,959 work-unit records (one JSON each, with per-slot traces)
 data/cache/                derived dataset caches (EUA Melbourne; GeoLife Beijing, all users)
-emu/                       packet-level emulation tier (v1.2): trace exporter, ns-3 program,
+emu/                       packet-level emulation tier (v1.2, v1.3): trace exporter, ns-3 program,
                            grid runner, loss-injection study and analysis (emu/README.md)
 ```
 
