@@ -8,6 +8,10 @@ FogField repositions UAV-mounted fog nodes with no central controller.
 - **Dynamics.** Nodes play best response with inertia (FogField-BR) or annealed log-linear learning (FogField-LLL). They use only a bounded neighbour view maintained by push-pull gossip.
 - **Energy and payload.** Node energy follows the Zeng–Xu–Zhang rotary-wing model, and station-keeping is modelled as loitering at the maximum-endurance speed. Gossip payload is *measured* by running the real serialisation codec.
 
+## Version 1.2 (27 Nov 2026): packet-level emulation tier
+
+v1.2 adds `emu/`: code that replays the gossip protocol, and the centralized reference's state collection, packet by packet in ns-3.48 over IEEE 802.11g (a disk channel and a Nakagami-fading channel), and re-runs the simulator with the delivery probabilities measured there. The simulator and the ledger of v1.1 are unchanged. See `emu/README.md`.
+
 ## Version 1.1 (15 Oct 2026): common random numbers and a full re-run
 
 v1.1 re-runs the whole study. The tag `v1.0` keeps the original code and ledger for comparison. The changes:
@@ -55,6 +59,8 @@ results/
   resume_selftest.json     checkpoint-resume self-test
   ledger.zip               2,959 work-unit records (one JSON each, with per-slot traces)
 data/cache/                derived dataset caches (EUA Melbourne; GeoLife Beijing, all users)
+emu/                       packet-level emulation tier (v1.2): trace exporter, ns-3 program,
+                           grid runner, loss-injection study and analysis (emu/README.md)
 ```
 
 ## Data
@@ -78,6 +84,8 @@ python driver.py --mode analysis  # tables and figures -> code/fogfield_out_v2/t
 ```
 
 To re-run the experiments, delete `code/fogfield_out_v2/results/` and call `python driver.py --mode grind` until `python grid_status.py` reports completion. Because the seeds are derived from each unit's parameters, a re-run reproduces the released records exactly, apart from the wall-clock fields. The v1.1 grid took about three hours with four CPU workers.
+
+The packet-level tier needs Linux or WSL 2 and ns-3.48; `emu/README.md` gives the commands.
 
 ## License
 

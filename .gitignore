@@ -11,3 +11,11 @@ code/paper_figs_v2/
 code/paper_tables/
 code/logs_v2/
 code/paper_numbers.json
+emu/traces/
+emu/runs/
+emu/loss_results/
+emu/outputs/
+emu/*.json
+emu/*.csv
+emu/*.log
+emu/*.out
